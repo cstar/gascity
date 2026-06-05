@@ -113,6 +113,18 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 			bead.ID, bead.Metadata["gc.kind"], bead.Status)
 		return ControlResult{}, nil
 	}
+	// A sling auto-convoy (gc sling) is a *tracking* convoy: Type=="convoy"
+	// with no gc.kind, linked to its target via a "tracks" dep (see the
+	// auto-convoy created in internal/sling). It is not a graph.v2 control
+	// bead and must not flow into the gc.kind switch below, where an empty
+	// kind would fall to the default and be hard-quarantined — which wedges
+	// the control dispatcher (incident po-de0tu / ga-1rmq). Treat it as a
+	// no-op so the dispatcher leaves it untouched for normal convoy rollup.
+	if bead.Type == "convoy" && strings.TrimSpace(bead.Metadata["gc.kind"]) == "" {
+		opts.tracef("process-control bead=%s skip reason=tracking_convoy type=%s",
+			bead.ID, bead.Type)
+		return ControlResult{}, nil
+	}
 	if result, handled, err := closeOrphanedControl(store, bead, opts); handled || err != nil {
 		return result, err
 	}

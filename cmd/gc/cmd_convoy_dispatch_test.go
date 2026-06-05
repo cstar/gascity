@@ -4311,6 +4311,45 @@ func TestRunControlDispatcherQuarantinesGenericControlFailure(t *testing.T) {
 	}
 }
 
+func TestRunControlDispatcherSkipsTrackingConvoy(t *testing.T) {
+	clearGCEnv(t)
+
+	// A `gc sling` auto-convoy: Type=="convoy" with no gc.kind. It is a
+	// tracking convoy, not a graph.v2 control bead, so the dispatcher must
+	// no-op it rather than hard-quarantine it on the empty kind (ga-1rmq).
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{
+		Title: "sling-h-target",
+		Type:  "convoy",
+	})
+	if err != nil {
+		t.Fatalf("create tracking convoy: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, convoy, convoy.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("get convoy: %v", err)
+	}
+	if after.Status != "open" {
+		t.Fatalf("tracking convoy status = %q, want open (not quarantined)", after.Status)
+	}
+	if got := after.Metadata["gc.control_quarantined"]; got == "true" {
+		t.Fatalf("gc.control_quarantined = %q, want tracking convoy not quarantined", got)
+	}
+	if slices.Contains(after.Labels, "gc:control-quarantined") {
+		t.Fatalf("labels = %#v, want no gc:control-quarantined on tracking convoy", after.Labels)
+	}
+	if got := stderr.String(); strings.Contains(got, "control dispatch: quarantined bead="+convoy.ID) {
+		t.Fatalf("stderr = %q, want no quarantine message for tracking convoy", got)
+	}
+}
+
 func TestRunWorkflowServeReturnsLegacyOversizedControlError(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
