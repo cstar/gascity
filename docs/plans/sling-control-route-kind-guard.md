@@ -181,3 +181,17 @@ Gates: `go test ./internal/sling/` green; `cmd/gc` `-run 'Sling|Route|Dispatch'`
 - *Refuse vs warn-and-drop:* took the plan's **hard-refuse** — (B) already makes a stray kind-less bead non-fatal, so a loud refusal at sling time is safe and surfaces the buggy caller. No legitimate caller routes kind-less control work through this boundary (the workflow decorator at `cmd_sling.go:1181` is the real control-routing path and is untouched).
 - *Base/remote:* PR targets `fork/feat/beads-proxied-pooling`, as with `ga-3p3o`. The bd-init bootstrap commit is rebased out so the diff is scoped to the fix.
 - Test note: `beads.NewMemStore()` assigns its own IDs, so the test captures the real ID from `Create` rather than asserting an input ID (the `slingTestStore` synthetic-fabrication path only handles dash-shaped IDs).
+
+### Reviewer round 1 — rig-scoped dispatcher bypass (CHANGES_REQUESTED → addressed)
+
+Reviewer (PR #3) found a MEDIUM correctness gap, empirically reproduced: the
+bare-name guard `routedTo == config.ControlDispatcherAgentName` matched only the
+literal `"control-dispatcher"`, so a kind-less bead routed to the **rig-scoped**
+form `<rig>/control-dispatcher` (produced by `controlDispatcherTargetForExecutionTarget`,
+injected per-rig at `config.go:4135`) **bypassed** the guard — `Route(kindless →
+gascity/control-dispatcher)` returned `err=nil` and wrote `gc.routed_to`.
+
+- [x] T-003 — extend `TestRouteRefusesKindlessControlBead` with the rig-scoped repro: kind-less → `gascity/control-dispatcher` must refuse + leave `gc.routed_to` unset, plus a non-regression case (valid kind still routes rig-scoped)   ✅ red at `34bad69ae` (case 4 failed: `err = nil, want refusal`)
+- [x] T-004 — make the guard suffix-aware via new `isControlDispatcherRouteTarget` helper, mirroring the serve-loop predicate `isWorkflowServeControlDispatcherAgent` (`dispatch_runtime.go:659`): `==bare || HasSuffix("/"+bare)`   ✅ green at `34bad69ae`
+
+Gates (round 1): `go test ./cmd/gc/ -run TestRouteRefusesKindlessControlBead` green; `cmd/gc -run 'Sling|Route|Dispatch'` blast-radius green; `internal/sling` green; `go vet ./cmd/gc/ ./internal/sling/` clean. Diff stays confined to `cmd_sling.go` + `cmd_sling_test.go` (per the validation gate); no refactor of the two sibling copies of the predicate (kept the change minimal per the reviewer's "mirror" prescription).
