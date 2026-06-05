@@ -167,3 +167,17 @@ consideration.
 - Re-stamping or back-filling kinds on already-routed kind-less beads.
 - The (B) serve-loop park path (already shipped under `ga-3p3o`).
 - `origin/main` — targets `feat/beads-proxied-pooling` only.
+
+## Status
+
+**Shipped — both micro-tasks green.**
+
+- [x] T-001 — failing test `TestRouteRefusesKindlessControlBead` in `cmd/gc/cmd_sling_test.go` (kind-less → dispatcher currently succeeds)   ✅ red at `65de98eba`
+- [x] T-002 — route guard in `cliBeadRouter.Route`: refuse a control-dispatcher route unless `graphroute.IsControlDispatcherKind(gc.kind)`; `gc.routed_to` left unset on refusal   ✅ green at `65de98eba`
+
+Gates: `go test ./internal/sling/` green; `cmd/gc` `-run 'Sling|Route|Dispatch'` blast-radius green; `go vet ./cmd/gc/ ./internal/sling/` clean. Diff confined to `cmd/gc/cmd_sling.go` + `cmd/gc/cmd_sling_test.go`.
+
+**Open-question resolutions (executor):**
+- *Refuse vs warn-and-drop:* took the plan's **hard-refuse** — (B) already makes a stray kind-less bead non-fatal, so a loud refusal at sling time is safe and surfaces the buggy caller. No legitimate caller routes kind-less control work through this boundary (the workflow decorator at `cmd_sling.go:1181` is the real control-routing path and is untouched).
+- *Base/remote:* PR targets `fork/feat/beads-proxied-pooling`, as with `ga-3p3o`. The bd-init bootstrap commit is rebased out so the diff is scoped to the fix.
+- Test note: `beads.NewMemStore()` assigns its own IDs, so the test captures the real ID from `Create` rather than asserting an input ID (the `slingTestStore` synthetic-fabrication path only handles dash-shaped IDs).
