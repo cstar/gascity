@@ -790,6 +790,8 @@ func TestRouteRefusesKindlessControlBead(t *testing.T) {
 	kindless := seed("")
 	valid := seed("check")
 	kindlessOther := seed("")
+	kindlessRig := seed("")
+	validRig := seed("check")
 
 	// Cfg nil so routedTo == req.Target verbatim (no pool normalization); the
 	// control-dispatcher is a singleton, so this is the real routing identity.
@@ -826,6 +828,34 @@ func TestRouteRefusesKindlessControlBead(t *testing.T) {
 	}
 	if got := getMeta(kindlessOther, "gc.routed_to"); got != "alpha/polecat" {
 		t.Fatalf("gc.routed_to = %q, want alpha/polecat", got)
+	}
+
+	// 4. rig-scoped dispatcher target "<rig>/control-dispatcher" must ALSO be
+	//    guarded. The per-rig form (controlDispatcherTargetForExecutionTarget)
+	//    bypasses a bare-name-only check, so a kind-less bead routed there would
+	//    otherwise slip through (ga-u64i reviewer repro).
+	rigDispatcher := "gascity/" + config.ControlDispatcherAgentName
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: kindlessRig,
+		Target: rigDispatcher,
+	}); err == nil {
+		t.Fatalf("Route(kind-less -> %s) err = nil, want refusal", rigDispatcher)
+	}
+	if got := getMeta(kindlessRig, "gc.routed_to"); got != "" {
+		t.Fatalf("gc.routed_to = %q after rig-scoped refusal, want unset", got)
+	}
+
+	// 5. a supported kind still routes to the rig-scoped dispatcher — the guard
+	//    refuses only kind-less/unsupported work, not legitimate rig-scoped
+	//    control routing (non-regression for the suffix-aware match).
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: validRig,
+		Target: rigDispatcher,
+	}); err != nil {
+		t.Fatalf("Route(check -> %s) err = %v, want success", rigDispatcher, err)
+	}
+	if got := getMeta(validRig, "gc.routed_to"); got != rigDispatcher {
+		t.Fatalf("gc.routed_to = %q, want %q", got, rigDispatcher)
 	}
 }
 

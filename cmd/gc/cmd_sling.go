@@ -638,8 +638,11 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// caller that slung kind-less control work is surfaced (the sound fix is to
 	// stamp the correct kind at that creation site). Legitimate control beads
 	// are routed by the workflow decorator, not this generic boundary, so they
-	// are unaffected. The extra Get only runs for the (rare) dispatcher target.
-	if routedTo == config.ControlDispatcherAgentName {
+	// are unaffected. The extra Get only runs for the (rare) dispatcher target,
+	// matched in both its bare and rig-scoped "<rig>/control-dispatcher" forms
+	// (controlDispatcherTargetForExecutionTarget) so the per-rig route cannot
+	// slip past the guard.
+	if isControlDispatcherRouteTarget(routedTo) {
 		bead, err := r.deps.Store.Get(req.BeadID)
 		if err != nil {
 			return fmt.Errorf("loading %s to validate control-dispatcher route: %w", req.BeadID, err)
@@ -652,6 +655,18 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
+}
+
+// isControlDispatcherRouteTarget reports whether a normalized route target
+// addresses the singleton control-dispatcher — either the bare name or the
+// rig-scoped "<rig>/control-dispatcher" form produced by
+// controlDispatcherTargetForExecutionTarget. Mirrors the serve-loop predicate
+// isWorkflowServeControlDispatcherAgent (dispatch_runtime.go) so the sling
+// guard and the dispatcher agree on what counts as the control lane.
+func isControlDispatcherRouteTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	return target == config.ControlDispatcherAgentName ||
+		strings.HasSuffix(target, "/"+config.ControlDispatcherAgentName)
 }
 
 // printSlingWarnings prints only warnings from a SlingResult to stderr.
