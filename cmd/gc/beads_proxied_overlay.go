@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,8 +26,10 @@ import (
 // city does not opt in (or bd lacks support) every path here is a no-op or a
 // clean revert, so existing cities and standard-bd deployments are unaffected.
 
-const proxiedServerClientInfoFile = "proxied_server_client_info.json"
-const doltModeProxiedServer = "proxied-server"
+const (
+	proxiedServerClientInfoFile = "proxied_server_client_info.json"
+	doltModeProxiedServer       = "proxied-server"
+)
 
 // proxiedServerClientInfo mirrors the subset of beads'
 // configfile.ProxiedServerClientInfo that gascity writes. gascity cannot import
@@ -90,18 +91,68 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	if env == nil {
 		return
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil || !proxiedServerScopeActive(cfg) {
+	active, n, idle, shared := resolveProxiedGate(cityPath)
+	if !active {
 		return
 	}
-	n := strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
-	idle := cfg.Beads.ProxyIdleTimeoutOrDefault()
 	env["GC_BEADS_PROXIED"] = "1"
 	env["GC_BEADS_PROXY_POOL_SIZE"] = n
 	env["BEADS_PROXY_POOL_SIZE"] = n
 	// Keep proxies warm across sparse controller probes (kills respawn churn).
 	env["GC_BEADS_PROXY_IDLE_TIMEOUT"] = idle
 	env["BEADS_PROXY_IDLE_TIMEOUT"] = idle
+	// Collapse every proxied scope onto one shared db-proxy-child when the
+	// operator gate is on (default off; a separate gate, never implied by
+	// proxied). GC_* is forwarded by gc-beads-bd.sh; the bare key is read by
+	// Go-launched (controller) bd directly.
+	if shared {
+		env["GC_BEADS_SHARED_PROXY"] = "1"
+		env["BEADS_SHARED_PROXY"] = "1"
+	}
+}
+
+// proxiedGateCache memoizes the [beads] proxied gate per city, keyed by
+// city.toml's mtime. applyProxiedPoolEnv runs on every bd-command env build (hot
+// under active agents); resolving it through the full loadCityConfig forced a
+// pack-DAG expansion per invocation. The gate fields (proxied / proxy_pool_size
+// / proxy_idle_timeout) are operator-set in city.toml, so a cheap TOML parse —
+// cached until city.toml changes — suffices and skips the per-command expansion.
+var proxiedGateCache sync.Map // cityPath -> proxiedGateEntry
+
+type proxiedGateEntry struct {
+	mtime    int64
+	active   bool
+	poolSize string
+	idle     string
+	shared   bool
+}
+
+// resolveProxiedGate reports whether the city opts into proxied mode (and bd
+// supports it), plus the pool size and idle timeout, parsing only city.toml's
+// [beads] section and memoizing by city.toml mtime.
+func resolveProxiedGate(cityPath string) (active bool, poolSize, idle string, shared bool) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	fi, err := os.Stat(tomlPath)
+	if err != nil {
+		return false, "", "", false
+	}
+	mt := fi.ModTime().UnixNano()
+	if v, ok := proxiedGateCache.Load(cityPath); ok {
+		if e := v.(proxiedGateEntry); e.mtime == mt {
+			return e.active, e.poolSize, e.idle, e.shared
+		}
+	}
+	entry := proxiedGateEntry{mtime: mt}
+	if data, readErr := os.ReadFile(tomlPath); readErr == nil {
+		if cfg, parseErr := config.Parse(data); parseErr == nil && proxiedServerScopeActive(cfg) {
+			entry.active = true
+			entry.poolSize = strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
+			entry.idle = cfg.Beads.ProxyIdleTimeoutOrDefault()
+			entry.shared = cfg.Beads.SharedProxyEnabled()
+		}
+	}
+	proxiedGateCache.Store(cityPath, entry)
+	return entry.active, entry.poolSize, entry.idle, entry.shared
 }
 
 // applyProxiedServerScopeOverlay reconciles a scope's proxied-server state.
@@ -110,6 +161,8 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 // target; active=false removes any stale client_info (metadata is already
 // "server" from ensureCanonicalScopeMetadata). Idempotent — safe on every
 // reconcile and for the on→off revert.
+//
+//nolint:unparam // fs is threaded for testability/parity with the contract helpers; production callers pass fsys.OSFS{}.
 func applyProxiedServerScopeOverlay(fs fsys.FS, cityRoot, scopeRoot string, active bool) error {
 	beadsDir := filepath.Join(scopeRoot, ".beads")
 	clientInfoPath := filepath.Join(beadsDir, proxiedServerClientInfoFile)
