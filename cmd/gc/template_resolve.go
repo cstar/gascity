@@ -618,6 +618,10 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
 	ensureProjectedPostgresEnvExplicit(env)
+	// Project the proxied/pool selection into the session too — session-launched
+	// bd otherwise spawns per-scope db-proxy-children even when the shared_proxy
+	// gate has collapsed the fleet onto one shared child (ga-3qlfa).
+	applyProxiedPoolSessionEnv(env, cityPath)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
