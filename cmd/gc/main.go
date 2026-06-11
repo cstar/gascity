@@ -408,7 +408,10 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 	applyProductionProductMetricsCommandCensus(root)
 
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	if options.discoverPackCommands && options.eagerPackCommandDiscovery {
+	// Skipped when argv routes to a core command (packs can't shadow those,
+	// and tryPackCommandFallback covers execution) — the eager pass costs a
+	// full city-config + pack-DAG load per invocation (ga-4419j).
+	if options.discoverPackCommands && options.eagerPackCommandDiscovery && packCommandsNeeded(root, options.invocationArgs) {
 		registerPackCommands(root, options.invocationArgs, stdout, stderr)
 	}
 
