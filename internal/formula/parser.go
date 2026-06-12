@@ -444,6 +444,22 @@ func mergeComposeRules(base, overlay *ComposeRules) *ComposeRules {
 // varPattern matches {{variable}} placeholders.
 var varPattern = regexp.MustCompile(`\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}`)
 
+// flexVarPattern additionally tolerates surrounding whitespace and an optional
+// leading dot — the Go text/template spelling ({{ .Feature }}) that formula
+// authors reach for because gc's prompt templates use it. Substitution only
+// fires for names present in the vars map, so arbitrary Go-template constructs
+// in step bodies ({{if .X}}, {{ .Values.path }}, undeclared names) are never
+// rewritten. Without this, a Go-template-spelled formula poured silently with
+// raw placeholders in every step (ga-mulfe: executors handed the steps back,
+// re-waking the planner each cycle).
+var flexVarPattern = regexp.MustCompile(`\{\{\s*\.?([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}`)
+
+// flexVarName extracts the variable name from a flexVarPattern match.
+func flexVarName(match string) string {
+	inner := strings.TrimSpace(match[2 : len(match)-2])
+	return strings.TrimPrefix(inner, ".")
+}
+
 // ExtractVariables finds all {{variable}} references in a formula.
 func ExtractVariables(formula *Formula) []string {
 	seen := make(map[string]bool)
@@ -501,12 +517,12 @@ func ExtractVariables(formula *Formula) []string {
 	return vars
 }
 
-// Substitute replaces {{variable}} placeholders with values.
+// Substitute replaces {{variable}} placeholders with values. The canonical
+// spelling is {{name}}; the Go text/template spellings {{ name }} and
+// {{ .name }} are accepted as aliases for names that exist in vars.
 func Substitute(s string, vars map[string]string) string {
-	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
-		// Extract variable name from {{name}}
-		name := match[2 : len(match)-2]
-		if val, ok := vars[name]; ok {
+	return flexVarPattern.ReplaceAllStringFunc(s, func(match string) string {
+		if val, ok := vars[flexVarName(match)]; ok {
 			return val
 		}
 		return match // Keep unresolved placeholders
@@ -514,10 +530,11 @@ func Substitute(s string, vars map[string]string) string {
 }
 
 // CheckResidualVars returns the names of any {{...}} placeholders remaining
-// in s after substitution. A non-empty return indicates a var name typo or
-// a missing or misspelled --var flag.
+// in s after substitution, in either the canonical {{name}} spelling or the
+// Go text/template spellings {{ name }} / {{ .name }}. A non-empty return
+// indicates a var name typo or a missing or misspelled --var flag.
 func CheckResidualVars(s string) []string {
-	matches := varPattern.FindAllStringSubmatch(s, -1)
+	matches := flexVarPattern.FindAllStringSubmatch(s, -1)
 	if len(matches) == 0 {
 		return nil
 	}
