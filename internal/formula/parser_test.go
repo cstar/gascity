@@ -983,6 +983,34 @@ func TestSubstitute(t *testing.T) {
 			vars:  map[string]string{"unused": "value"},
 			want:  "No variables here",
 		},
+		{
+			// Go text/template spelling with leading dot and spaces (ga-mulfe):
+			// accepted when the name is a known var.
+			input: "Smoke-test {{ .Feature }} on {{ .Host }}",
+			vars:  map[string]string{"Feature": "cron jobs", "Host": "hatch01"},
+			want:  "Smoke-test cron jobs on hatch01",
+		},
+		{
+			// Spaced spelling without dot.
+			input: "Deploy {{ project }}",
+			vars:  map[string]string{"project": "myapp"},
+			want:  "Deploy myapp",
+		},
+		{
+			// Dot-form names NOT in vars stay untouched (arbitrary Go-template
+			// content in step bodies must never be rewritten).
+			input: "Render uses {{ .UnknownName }} later",
+			vars:  map[string]string{"Feature": "x"},
+			want:  "Render uses {{ .UnknownName }} later",
+		},
+		{
+			// Go-template constructs never match: the inner text is not a
+			// bare identifier ("if .Feature" has a space, ".Values.path" an
+			// inner dot).
+			input: "{{if .Feature}}yes and {{ .Values.path }}",
+			vars:  map[string]string{"Feature": "x", "Values": "y"},
+			want:  "{{if .Feature}}yes and {{ .Values.path }}",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1067,6 +1095,9 @@ func TestCheckResidualVars(t *testing.T) {
 		{name: "empty string", input: "", want: nil},
 		{name: "only placeholder", input: "{{title}}", want: []string{"title"}},
 		{name: "deduplicates repeated", input: "[{{epic}}] {{epic}} review", want: []string{"epic"}},
+		{name: "dot-form residual reported", input: "Smoke-test {{ .Feature }}", want: []string{"Feature"}},
+		{name: "spaced residual reported", input: "Deploy {{ project }}", want: []string{"project"}},
+		{name: "go-template constructs ignored", input: "{{if .Feature}}x {{ .Values.path }}", want: nil},
 	}
 
 	for _, tt := range tests {

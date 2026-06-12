@@ -987,6 +987,11 @@
           "description": "Proxied routes bd through the pooling db-proxy (ProxiedServerMode,\nexternal backend) instead of direct ServerMode, eliminating the per-call\nbd→dolt connection churn (#1978: ~71 new connections/sec to the managed\ndolt server). Defaults to false = current direct ServerMode, byte-for-byte\nidentical, so existing cities are unaffected. Requires a bd build that\nsupports `bd init --proxied-server` (external); when the resolved bd lacks\nit, gascity falls back to server mode and a doctor check flags it, so a\ncity paired with a standard bd never breaks.",
           "default": false
         },
+        "shared_proxy": {
+          "type": "boolean",
+          "description": "SharedProxy collapses every proxied scope onto ONE shared db-proxy-child:\neach scope resolves its proxy rootDir to doltserver.SharedProxyRootDir()\n(BEADS_SHARED_PROXY) instead of its per-scope .beads/proxieddb, so N+1\nper-scope children become 1 fronting the same managed dolt. Requires\nProxied=true AND a bd that supports the BEADS_SHARED_PROXY opt-in. Defaults\nto false and is a SEPARATE gate, never implied by Proxied: an always-on\ncollapse would fold the live fleet's proxies the moment a capable bd is\npinned, so the flip stays an explicit operator decision, validated on a\nthrowaway city before touching production.",
+          "default": false
+        },
         "proxy_pool_size": {
           "type": "integer",
           "description": "ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps\nper (capabilities, database) key when Proxied is true. Defaults to 4.\nThe proxy is shared per workspace root, so all agents of a scope share one\nwarm pool; the size is frozen by the first bd invocation that spawns the\nproxy (changing it requires restarting the db-proxy-child).",
