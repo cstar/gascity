@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -629,10 +630,43 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
 	}
+	// Sling hygiene (ga-u64i): never route a kind-less / unsupported-kind bead
+	// to the singleton control-dispatcher. The dispatcher categorizes work by
+	// gc.kind, so an unsupported kind cannot be handled — ga-3p3o's (B) fix now
+	// parks such a bead instead of crashing, but it should never have been
+	// routable here in the first place. Refuse loudly, naming the bead so the
+	// caller that slung kind-less control work is surfaced (the sound fix is to
+	// stamp the correct kind at that creation site). Legitimate control beads
+	// are routed by the workflow decorator, not this generic boundary, so they
+	// are unaffected. The extra Get only runs for the (rare) dispatcher target,
+	// matched in both its bare and rig-scoped "<rig>/control-dispatcher" forms
+	// (controlDispatcherTargetForExecutionTarget) so the per-rig route cannot
+	// slip past the guard.
+	if isControlDispatcherRouteTarget(routedTo) {
+		bead, err := r.deps.Store.Get(req.BeadID)
+		if err != nil {
+			return fmt.Errorf("loading %s to validate control-dispatcher route: %w", req.BeadID, err)
+		}
+		if kind := strings.TrimSpace(bead.Metadata["gc.kind"]); !graphroute.IsControlDispatcherKind(kind) {
+			return fmt.Errorf("refusing to control-route %s: gc.kind %q is not a supported control kind", req.BeadID, kind)
+		}
+	}
 	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil
+}
+
+// isControlDispatcherRouteTarget reports whether a normalized route target
+// addresses the singleton control-dispatcher — either the bare name or the
+// rig-scoped "<rig>/control-dispatcher" form produced by
+// controlDispatcherTargetForExecutionTarget. Mirrors the serve-loop predicate
+// isWorkflowServeControlDispatcherAgent (dispatch_runtime.go) so the sling
+// guard and the dispatcher agree on what counts as the control lane.
+func isControlDispatcherRouteTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	return target == config.ControlDispatcherAgentName ||
+		strings.HasSuffix(target, "/"+config.ControlDispatcherAgentName)
 }
 
 // printSlingWarnings prints only warnings from a SlingResult to stderr.

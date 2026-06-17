@@ -756,6 +756,109 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	}
 }
 
+// TestRouteRefusesKindlessControlBead pins the ga-u64i sling-hygiene invariant:
+// cliBeadRouter.Route must REFUSE to route a bead to the control-dispatcher
+// unless that bead carries a supported control gc.kind, and must leave
+// gc.routed_to unset on refusal. A bead with a valid control kind routes fine,
+// and the guard is scoped to the dispatcher only — kind-less routing to other
+// targets still succeeds. With (B) (ga-3p3o) the dispatcher already survives
+// such beads; this stops them from being routable in the first place.
+func TestRouteRefusesKindlessControlBead(t *testing.T) {
+	store := beads.NewMemStore()
+	// NewMemStore assigns its own IDs, so capture the real one from Create.
+	seed := func(kind string) string {
+		t.Helper()
+		created, err := store.Create(beads.Bead{Type: "task", Status: "open"})
+		if err != nil {
+			t.Fatalf("seed (kind=%q): %v", kind, err)
+		}
+		if kind != "" {
+			if err := store.SetMetadata(created.ID, "gc.kind", kind); err != nil {
+				t.Fatalf("set gc.kind=%q on %s: %v", kind, created.ID, err)
+			}
+		}
+		return created.ID
+	}
+	getMeta := func(id, key string) string {
+		t.Helper()
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		return b.Metadata[key]
+	}
+	kindless := seed("")
+	valid := seed("check")
+	kindlessOther := seed("")
+	kindlessRig := seed("")
+	validRig := seed("check")
+
+	// Cfg nil so routedTo == req.Target verbatim (no pool normalization); the
+	// control-dispatcher is a singleton, so this is the real routing identity.
+	router := cliBeadRouter{deps: &slingDeps{Store: store}}
+
+	// 1. kind-less bead → control-dispatcher: refused, gc.routed_to left unset.
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: kindless,
+		Target: config.ControlDispatcherAgentName,
+	}); err == nil {
+		t.Fatal("Route(kind-less -> control-dispatcher) err = nil, want refusal")
+	}
+	if got := getMeta(kindless, "gc.routed_to"); got != "" {
+		t.Fatalf("gc.routed_to = %q after refusal, want unset", got)
+	}
+
+	// 2. supported control kind → dispatcher: succeeds, route written.
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: valid,
+		Target: config.ControlDispatcherAgentName,
+	}); err != nil {
+		t.Fatalf("Route(check -> control-dispatcher) err = %v, want success", err)
+	}
+	if got := getMeta(valid, "gc.routed_to"); got != config.ControlDispatcherAgentName {
+		t.Fatalf("gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	}
+
+	// 3. guard is dispatcher-scoped: kind-less routing elsewhere still succeeds.
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: kindlessOther,
+		Target: "alpha/polecat",
+	}); err != nil {
+		t.Fatalf("Route(kind-less -> non-dispatcher) err = %v, want success", err)
+	}
+	if got := getMeta(kindlessOther, "gc.routed_to"); got != "alpha/polecat" {
+		t.Fatalf("gc.routed_to = %q, want alpha/polecat", got)
+	}
+
+	// 4. rig-scoped dispatcher target "<rig>/control-dispatcher" must ALSO be
+	//    guarded. The per-rig form (controlDispatcherTargetForExecutionTarget)
+	//    bypasses a bare-name-only check, so a kind-less bead routed there would
+	//    otherwise slip through (ga-u64i reviewer repro).
+	rigDispatcher := "gascity/" + config.ControlDispatcherAgentName
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: kindlessRig,
+		Target: rigDispatcher,
+	}); err == nil {
+		t.Fatalf("Route(kind-less -> %s) err = nil, want refusal", rigDispatcher)
+	}
+	if got := getMeta(kindlessRig, "gc.routed_to"); got != "" {
+		t.Fatalf("gc.routed_to = %q after rig-scoped refusal, want unset", got)
+	}
+
+	// 5. a supported kind still routes to the rig-scoped dispatcher — the guard
+	//    refuses only kind-less/unsupported work, not legitimate rig-scoped
+	//    control routing (non-regression for the suffix-aware match).
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: validRig,
+		Target: rigDispatcher,
+	}); err != nil {
+		t.Fatalf("Route(check -> %s) err = %v, want success", rigDispatcher, err)
+	}
+	if got := getMeta(validRig, "gc.routed_to"); got != rigDispatcher {
+		t.Fatalf("gc.routed_to = %q, want %q", got, rigDispatcher)
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
