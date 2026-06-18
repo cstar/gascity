@@ -5142,3 +5142,74 @@ func TestReapStaleBdExportJSONLLeavesFileOnUnmanagedScope(t *testing.T) {
 		t.Fatalf("jsonl removed on unmanaged scope; stat err = %v, want nil", err)
 	}
 }
+
+// ── Proxied/pool env projection into session env (ga-3qlfa) ───────────
+
+func writeSessionProxiedScaffold(t *testing.T, cityTOML string) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: demo\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityDoltConfigs.Store(cityPath, config.DoltConfig{Host: "compat-db.example.com", Port: 4406})
+	t.Cleanup(func() { cityDoltConfigs.Delete(cityPath) })
+	return cityPath
+}
+
+// Session-launched bd reads the bare BEADS_* keys directly (raw `bd` provider)
+// and the GC_* keys via gc-beads-bd.sh. Without this projection, an agent
+// session's bd sees a proxied scope with no shared_proxy selection and spawns
+// a per-scope db-proxy-child (30s idle churn) instead of reusing the shared
+// child the controller maintains.
+func TestSessionBackendEnvCarriesProxiedPoolEnv(t *testing.T) {
+	setProxiedProbe(t, true)
+	const tomlShared = "[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 6\nshared_proxy = true\n"
+	cityPath := writeSessionProxiedScaffold(t, tomlShared)
+
+	env := mustSessionBackendEnv(t, cityPath, "", nil)
+	if env["GC_BEADS_PROXIED"] != "1" {
+		t.Fatalf("GC_BEADS_PROXIED = %q, want 1 (env=%v)", env["GC_BEADS_PROXIED"], env)
+	}
+	if env["BEADS_SHARED_PROXY"] != "1" || env["GC_BEADS_SHARED_PROXY"] != "1" {
+		t.Fatalf("shared keys = %q/%q, want 1/1", env["BEADS_SHARED_PROXY"], env["GC_BEADS_SHARED_PROXY"])
+	}
+	if env["BEADS_PROXY_IDLE_TIMEOUT"] != "0" || env["BEADS_PROXY_POOL_SIZE"] != "6" {
+		t.Fatalf("idle/pool = %q/%q, want 0/6", env["BEADS_PROXY_IDLE_TIMEOUT"], env["BEADS_PROXY_POOL_SIZE"])
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte("issue_prefix: repo\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigEnv := mustSessionBackendEnv(t, cityPath, rigDir, []config.Rig{{Name: "repo", Path: rigDir}})
+	if rigEnv["BEADS_SHARED_PROXY"] != "1" || rigEnv["GC_BEADS_SHARED_PROXY"] != "1" {
+		t.Fatalf("rig session shared keys = %q/%q, want 1/1", rigEnv["BEADS_SHARED_PROXY"], rigEnv["GC_BEADS_SHARED_PROXY"])
+	}
+}
+
+// Sessions keep their env for their whole tmux lifetime, so when the gate is
+// off the keys must be present-but-empty (the tmux launcher uses `env -u` for
+// empty values) — otherwise a session spawned before a shared_proxy revert
+// keeps routing through a shared root the controller no longer maintains.
+func TestSessionBackendEnvProxiedPoolKeysExplicitEmptyWhenGateOff(t *testing.T) {
+	setProxiedProbe(t, true)
+	const tomlOff = "[workspace]\nname = \"t\"\n\n[beads]\nproxied = false\n"
+	cityPath := writeSessionProxiedScaffold(t, tomlOff)
+
+	env := mustSessionBackendEnv(t, cityPath, "", nil)
+	for _, key := range proxiedPoolSessionEnvKeys {
+		got, ok := env[key]
+		if !ok || got != "" {
+			t.Fatalf("env[%q] = %q (present=%v), want explicit empty", key, got, ok)
+		}
+	}
+}

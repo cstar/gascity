@@ -111,6 +111,36 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	}
 }
 
+// proxiedPoolSessionEnvKeys is every key applyProxiedPoolEnv can set. Session
+// env projection seeds them all explicitly so tmux can clear stale values
+// (empty string → `env -u`) when the gate is off or reverted.
+var proxiedPoolSessionEnvKeys = []string{
+	"GC_BEADS_PROXIED",
+	"GC_BEADS_PROXY_POOL_SIZE", "BEADS_PROXY_POOL_SIZE",
+	"GC_BEADS_PROXY_IDLE_TIMEOUT", "BEADS_PROXY_IDLE_TIMEOUT",
+	"GC_BEADS_SHARED_PROXY", "BEADS_SHARED_PROXY",
+}
+
+// applyProxiedPoolSessionEnv projects the proxied/pool env into an agent
+// session's backend env. Sessions launch bd themselves (raw `bd` provider reads
+// the bare BEADS_* keys; gc-beads-bd.sh forwards the GC_* ones), so without
+// this projection a session-launched bd sees a proxied scope with no
+// shared_proxy selection and spawns a per-scope db-proxy-child (default 30s
+// idle) against the same upstream the shared child already serves — transient
+// per-rig children churning once per bd call (ga-3qlfa). Unlike
+// applyProxiedPoolEnv, the keys are always present: a session keeps its env
+// for its whole tmux lifetime, and the explicit empty values let a session
+// spawned after a gate revert unset what its tmux server inherited.
+func applyProxiedPoolSessionEnv(env map[string]string, cityPath string) {
+	if env == nil {
+		return
+	}
+	for _, key := range proxiedPoolSessionEnvKeys {
+		env[key] = ""
+	}
+	applyProxiedPoolEnv(env, cityPath)
+}
+
 // proxiedGateCache memoizes the [beads] proxied gate per city, keyed by
 // city.toml's mtime. applyProxiedPoolEnv runs on every bd-command env build (hot
 // under active agents); resolving it through the full loadCityConfig forced a
