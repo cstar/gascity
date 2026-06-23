@@ -291,6 +291,27 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+
+	// ADR-0018 Layer 3: write-behind buffer for DEFERRABLE outcome-label
+	// writes (exec/wisp outcome labels, markTrackingFailure). These labels
+	// are informational — they do NOT gate the next tick — so batching them
+	// into one transaction per flush cuts per-order Dolt write round-trips.
+	//
+	// The wisp-ROOT label (order-run:*, site in dispatchWisp) is the
+	// duplicate-dispatch gate and is NEVER buffered; it stays a synchronous
+	// store.Update inside the dispatchOne goroutine so the next tick's
+	// hasOpenWorkStrict gate always sees it. See flushLabelUpdates / dispatch.
+	//
+	// pending is keyed by store, then by bead id: a tracking bead / wisp lives
+	// in exactly one store (the per-target store dispatchOne was handed), so
+	// flushing must apply each id's update to ITS store, never another tick's
+	// store. Repeated enqueues to the same (store,id) merge their Labels
+	// (append, deduped) and Metadata (last-writer-wins per key) so multiple
+	// deferrable writes to one tracking bead collapse to a single Update. The
+	// dispatchOne goroutines write concurrently, so all access is guarded by
+	// pendingMu.
+	pendingMu sync.Mutex
+	pending   map[beads.Store]map[string]beads.UpdateOpts
 }
 
 type orderDispatchTrackingIndex struct {
@@ -444,6 +465,21 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	defer func() {
 		go func() {
 			inFlight.Wait()
+			// All dispatchOne goroutines launched by this tick have now
+			// returned, so every DEFERRABLE outcome label they enqueued is in
+			// the buffer. Flush them in one batch BEFORE closing the per-tick
+			// store handles (a native store handle is a one-way latch). The
+			// wisp-root order-run:* gate label is written synchronously inside
+			// dispatchWisp, not buffered, so it is already visible to the next
+			// tick regardless of when this detached flush runs.
+			//
+			// Racing with a concurrent drain()->flushAllLabelUpdates is benign
+			// by design: flushLabelUpdates snapshots-and-deletes each store's
+			// batch under pendingMu, so exactly one caller wins each batch; the
+			// loser sees an empty map and no-ops. No double-apply, no loss.
+			for _, st := range stores {
+				m.flushLabelUpdates(st)
+			}
 			for _, st := range stores {
 				if err := closeBeadStoreHandle(st); err != nil {
 					logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
@@ -715,13 +751,159 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 	done := m.inflightDone
 	m.inflightMu.Unlock()
 	if done == nil {
+		// Nothing in flight, but a prior tick's detached flusher may not have
+		// run yet (or a goroutine enqueued after its flush). Flush any
+		// remaining buffered outcome labels so controller stop loses nothing.
+		m.flushAllLabelUpdates()
 		return true
 	}
 	select {
 	case <-done:
+		// All in-flight goroutines finished and enqueued their deferred
+		// labels; flush them before returning so a controller stop right after
+		// drain doesn't strand outcome labels in the buffer.
+		m.flushAllLabelUpdates()
 		return true
 	case <-ctx.Done():
+		// Timed out: still flush whatever has been buffered so far rather than
+		// drop it; goroutines that are still running will be flushed by their
+		// tick's detached flusher (or the next boot's sweep) as before.
+		m.flushAllLabelUpdates()
 		return false
+	}
+}
+
+// enqueueLabelUpdate buffers a DEFERRABLE label/metadata update for bead id
+// instead of issuing a synchronous store.Update. Repeated calls for the same
+// id merge their Labels (appended, deduped) and Metadata (per-key
+// last-writer-wins). Goroutine-safe: dispatchOne goroutines call this
+// concurrently. The buffered writes are applied later by flushLabelUpdates.
+//
+// Deferred writes cannot return an inline error; callers that previously
+// logged on Update failure rely on flushLabelUpdates logging on flush failure
+// instead. Best-effort sites stay best-effort.
+func (m *memoryOrderDispatcher) enqueueLabelUpdate(store beads.Store, id string, opts beads.UpdateOpts) {
+	if store == nil || id == "" {
+		return
+	}
+	m.pendingMu.Lock()
+	defer m.pendingMu.Unlock()
+	if m.pending == nil {
+		m.pending = make(map[beads.Store]map[string]beads.UpdateOpts)
+	}
+	byID, ok := m.pending[store]
+	if !ok {
+		byID = make(map[string]beads.UpdateOpts)
+		m.pending[store] = byID
+	}
+	cur, ok := byID[id]
+	if !ok {
+		// Copy slices/maps so the buffered entry doesn't alias caller state.
+		merged := beads.UpdateOpts{}
+		if len(opts.Labels) > 0 {
+			merged.Labels = append([]string(nil), opts.Labels...)
+		}
+		if len(opts.Metadata) > 0 {
+			merged.Metadata = make(map[string]string, len(opts.Metadata))
+			for k, v := range opts.Metadata {
+				merged.Metadata[k] = v
+			}
+		}
+		byID[id] = merged
+		return
+	}
+	// Merge into the existing entry. Dedup labels so repeated outcome labels
+	// (e.g. "wisp" enqueued twice) collapse.
+	seen := make(map[string]struct{}, len(cur.Labels))
+	for _, l := range cur.Labels {
+		seen[l] = struct{}{}
+	}
+	for _, l := range opts.Labels {
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		cur.Labels = append(cur.Labels, l)
+	}
+	if len(opts.Metadata) > 0 {
+		if cur.Metadata == nil {
+			cur.Metadata = make(map[string]string, len(opts.Metadata))
+		}
+		for k, v := range opts.Metadata {
+			cur.Metadata[k] = v
+		}
+	}
+	byID[id] = cur
+}
+
+// flushLabelUpdates drains the write-behind buffer and applies every pending
+// update to store. It prefers a single store.Tx so all buffered Updates land
+// in one transaction/commit (the ADR-0018 Layer 3 contention win); if Tx
+// returns an error it falls back to sequential per-id Update so a transient
+// Tx-layer issue doesn't silently drop outcome labels.
+//
+// Goroutine-safe and idempotent: it snapshots-and-clears the buffer under the
+// lock, so a concurrent enqueue is never lost (it simply lands in the next
+// flush), and calling it with an empty buffer is a no-op. Flush failures are
+// logged (deferred writes can't surface an inline error to the original
+// caller).
+func (m *memoryOrderDispatcher) flushLabelUpdates(store beads.Store) {
+	if store == nil {
+		return
+	}
+	m.pendingMu.Lock()
+	batch := m.pending[store]
+	if len(batch) == 0 {
+		m.pendingMu.Unlock()
+		return
+	}
+	delete(m.pending, store)
+	m.pendingMu.Unlock()
+
+	// Deterministic order keeps the commit reproducible and test assertions
+	// stable.
+	ids := make([]string, 0, len(batch))
+	for id := range batch {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	txErr := store.Tx("gc: order dispatch: flush deferred outcome labels", func(tx beads.Tx) error {
+		for _, id := range ids {
+			if err := tx.Update(id, batch[id]); err != nil {
+				return fmt.Errorf("updating %s: %w", id, err)
+			}
+		}
+		return nil
+	})
+	if txErr == nil {
+		return
+	}
+	logDispatchError(m.stderr, "gc: order dispatch: batched label flush via Tx failed (%v); falling back to sequential updates", txErr)
+	for _, id := range ids {
+		if err := store.Update(id, batch[id]); err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: flushing deferred labels for %s: %v", id, err)
+		}
+	}
+}
+
+// flushAllLabelUpdates flushes every store's buffered updates. Used on
+// controller shutdown (drain) so deferred outcome labels are not lost when the
+// process stops between ticks. It iterates the store set captured in the
+// buffer keys, so it needs no external store handles. Idempotent and
+// goroutine-safe (flushLabelUpdates snapshots-and-deletes per store under the
+// lock). Racing with the per-tick detached flusher is benign by design: each
+// store's batch is claimed by exactly one caller under pendingMu; the other
+// sees an empty map and no-ops — no double-apply, no loss.
+func (m *memoryOrderDispatcher) flushAllLabelUpdates() {
+	m.pendingMu.Lock()
+	storesWithPending := make([]beads.Store, 0, len(m.pending))
+	for st := range m.pending {
+		storesWithPending = append(storesWithPending, st)
+	}
+	m.pendingMu.Unlock()
+	for _, st := range storesWithPending {
+		m.flushLabelUpdates(st)
 	}
 }
 
@@ -1167,9 +1349,8 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 			errMsg := fmt.Sprintf("reading event cursor: %v", err)
 			labels = []string{"exec-failed"}
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
-			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
-				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
-			}
+			// Deferrable outcome label: informational, does not gate next tick.
+			m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: labels})
 			m.rec.Record(events.Event{
 				Type:    events.OrderFailed,
 				Actor:   "controller",
@@ -1179,14 +1360,17 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 			return
 		}
 		hasEventCursor = true
-		// Event-triggered exec orders persist the cursor before the command
-		// runs; otherwise a crash after the side effect can replay the event.
+		// Event-triggered exec orders persist the cursor SYNCHRONOUSLY before
+		// the command runs; otherwise a crash after the side effect but before
+		// a batched flush could replay the event. This is a crash-replay
+		// durability invariant (not just the next-tick gate), so it is NOT
+		// write-behind buffered. (ADR-0018 Layer 3: kept synchronous on
+		// purpose.)
 		if err := store.Update(trackingID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: failed to label exec event cursor on tracking bead %s: %v", scoped, trackingID, err)
 			labels = []string{"exec-failed"}
-			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
-				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
-			}
+			// Deferrable outcome label: informational, does not gate next tick.
+			m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: labels})
 			m.rec.Record(events.Event{
 				Type:    events.OrderFailed,
 				Actor:   "controller",
@@ -1220,21 +1404,12 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	}
 
 	// Label tracking bead with outcome via store (not CLI). For event execs,
-	// cursor labels were already persisted before the command ran.
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
-		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
-		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
-		if hasEventCursor {
-			msg = fmt.Sprintf("seq=%d: %s", headSeq, msg)
-		}
-		m.rec.Record(events.Event{
-			Type:    events.OrderFailed,
-			Actor:   "controller",
-			Subject: scoped,
-			Message: msg,
-		})
-		return
-	}
+	// cursor labels were already persisted synchronously before the command
+	// ran. This outcome label is DEFERRABLE (informational; the next tick's
+	// gate keys off the tracking bead's open/closed status and the wisp-root
+	// order-run:* label, not these outcome labels), so it is write-behind
+	// buffered and flushed in a batch at end of tick / on drain.
+	m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: labels})
 	if execErrMsg != "" {
 		if hasEventCursor {
 			execErrMsg = fmt.Sprintf("seq=%d: %s", headSeq, execErrMsg)
@@ -1287,7 +1462,8 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
+		// Deferrable best-effort outcome label.
+		m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}})
 		return
 	}
 
@@ -1390,6 +1566,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
+	// CRITICAL (ADR-0018 Layer 3): the wisp-root order-run:* label is the
+	// duplicate-dispatch gate. The next tick's hasOpenWorkStrict gate queries
+	// wisps by order-run:<scoped>; if this label isn't visible by the next
+	// tick, a duplicate wisp fires. This dispatchOne goroutine may outlive the
+	// tick, so this write is kept SYNCHRONOUS (NOT write-behind buffered) — it
+	// is durable the instant store.Update returns, regardless of when the
+	// deferred-label flush runs. Everything else in this function is buffered.
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
 		// Log and emit an event so operators can investigate.
@@ -1410,8 +1593,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		Subject: scoped,
 	})
 
-	// Label tracking bead with outcome.
-	store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+	// Label tracking bead with outcome. Deferrable: informational, does not
+	// gate next tick. Buffered and flushed in a batch at end of tick / drain.
+	m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: []string{"wisp"}})
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
@@ -1438,9 +1622,11 @@ func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingI
 	if a.Trigger == "event" && headSeq > 0 {
 		labels = append(labels, eventCursorLabels(scoped, headSeq)...)
 	}
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
-		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
-	}
+	// Deferrable outcome label: informational, does not gate the next tick
+	// (the open tracking bead itself, closed by dispatchOne's defer, plus the
+	// absence of the wisp-root order-run:* label, drive the gate). Buffered
+	// and flushed in a batch at end of tick / on drain.
+	m.enqueueLabelUpdate(store, trackingID, beads.UpdateOpts{Labels: labels})
 }
 
 func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {

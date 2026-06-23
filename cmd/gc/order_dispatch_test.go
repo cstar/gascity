@@ -193,6 +193,29 @@ func (s execLabelUpdateFailStore) Update(id string, opts beads.UpdateOpts) error
 	return s.Store.Update(id, opts)
 }
 
+// Tx rejects the "exec" outcome label inside a transaction too, so the
+// ADR-0018 Layer 3 batched flush of the deferred outcome label fails the same
+// way a synchronous Update would have. The flush falls back to sequential
+// Update (which also fails), and both paths log rather than emit an event.
+func (s execLabelUpdateFailStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	return s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(execLabelUpdateFailTx{tx})
+	})
+}
+
+type execLabelUpdateFailTx struct {
+	beads.Tx
+}
+
+func (t execLabelUpdateFailTx) Update(id string, opts beads.UpdateOpts) error {
+	for _, label := range opts.Labels {
+		if label == "exec" {
+			return fmt.Errorf("exec label failed")
+		}
+	}
+	return t.Tx.Update(id, opts)
+}
+
 func (s eventCursorUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
 	for _, label := range opts.Labels {
 		if strings.HasPrefix(label, "order:") {
@@ -773,6 +796,9 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	logs := captureCmdOrderLogs(t, func() {
 		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
 	})
+	// ADR-0018 Layer 3: deferrable outcome labels are write-behind buffered;
+	// flush them so the direct dispatchExec call's outcome is observable.
+	mad.flushAllLabelUpdates()
 
 	if calls != 0 {
 		t.Fatalf("exec calls = %d, want 0", calls)
@@ -796,6 +822,7 @@ func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
 	mad.ep = eventLog
 	mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID)
+	mad.flushAllLabelUpdates()
 
 	if calls != 1 {
 		t.Fatalf("exec calls after cursor read recovers = %d, want 1", calls)
@@ -848,11 +875,16 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("exec calls = %d, want 1", calls)
 	}
-	if !rec.hasType(events.OrderFailed) {
-		t.Fatal("missing order.failed event")
-	}
-	if rec.hasType(events.OrderCompleted) {
-		t.Fatal("unexpected order.completed event")
+	// ADR-0018 Layer 3: the exec OUTCOME label is now write-behind buffered
+	// and applied in a batched flush, which cannot surface an inline error to
+	// emit OrderFailed; a flush failure is LOGGED instead (logging may happen
+	// in either the per-tick detached flusher or drain, so we assert on the
+	// durable effect rather than on log capture timing). The store rejects the
+	// "exec" outcome label, so it must NOT be present on the tracking bead.
+	// The exec itself succeeded, so OrderCompleted fires — the deferred-label
+	// flush failure no longer suppresses it (that inline coupling is gone).
+	if !rec.hasType(events.OrderCompleted) {
+		t.Fatal("missing order.completed event (exec succeeded; only the deferred label flush failed)")
 	}
 	all := trackingBeads(t, store, "order-run:release-exec")
 	if len(all) != 1 {
@@ -874,9 +906,17 @@ func TestOrderDispatchEventExecLabelFailureRecordsOrderFailure(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("exec calls after second dispatch = %d, want 1", calls)
 	}
+	// ADR-0018 Layer 3: the deferred outcome-label flush logs its own failure
+	// message (the synchronous "failed to label exec tracking bead" path is
+	// gone for this DEFERRABLE label). The flush failure is logged on flush.
 	combined := logs + "\n" + stderr.String()
-	if !strings.Contains(combined, "failed to label exec tracking bead") {
-		t.Fatalf("logs = %q, want tracking label failure", combined)
+	if !strings.Contains(combined, "flush") && !strings.Contains(combined, "deferred labels") {
+		t.Fatalf("logs = %q, want a deferred-label flush failure", combined)
+	}
+	// The rejected "exec" outcome label must NOT be present on the tracking
+	// bead (the flush could not apply it).
+	if slicesContain(all[0].Labels, "exec") {
+		t.Fatalf("tracking bead unexpectedly has exec label despite flush rejection: %v", all[0].Labels)
 	}
 }
 
@@ -957,6 +997,8 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	mad.stderr = &stderr
 
 	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	// ADR-0018 Layer 3: flush write-behind buffered outcome labels.
+	mad.flushAllLabelUpdates()
 
 	all := trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -1012,6 +1054,8 @@ description = "Inspect convoy {{convoy_id}}"
 	mad := ad.(*memoryOrderDispatcher)
 
 	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+	// ADR-0018 Layer 3: flush write-behind buffered outcome labels.
+	mad.flushAllLabelUpdates()
 
 	all := trackingBeads(t, store, "order-run:convoy-patrol")
 	if len(all) != 1 {
@@ -1645,6 +1689,8 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	logs := captureCmdOrderLogs(t, func() {
 		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, aa[0], t.TempDir(), tracking.ID)
 	})
+	// ADR-0018 Layer 3: flush write-behind buffered outcome labels.
+	mad.flushAllLabelUpdates()
 
 	// Check tracking bead has exec-failed label.
 	all := trackingBeads(t, store, "order-run:fail-exec")
@@ -1702,6 +1748,8 @@ dolt.auto-start: false
 	logs := captureCmdOrderLogs(t, func() {
 		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID)
 	})
+	// ADR-0018 Layer 3: flush write-behind buffered outcome labels.
+	mad.flushAllLabelUpdates()
 
 	all := trackingBeads(t, store, "order-run:pg-env")
 	if len(all) != 1 {
