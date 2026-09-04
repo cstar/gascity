@@ -3461,7 +3461,7 @@ Suspend a rig by recording the suspension in the runtime state file
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's Dolt
 database is parked out of the managed server's data directory
-(.beads/dolt -> .beads/dolt-suspended) so the server stops serving and
+(.beads/dolt -&gt; .beads/dolt-suspended) so the server stops serving and
 enumerating it; set GC_DOLT_PARK_ON_SUSPEND=0 to leave it served.
 Use "gc rig resume" to restore both.
 
