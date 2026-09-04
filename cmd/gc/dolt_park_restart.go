@@ -26,7 +26,11 @@ var restartManagedDoltAfterPark = func(cityPath string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("locating gc binary: %w", err)
 	}
-	cmd := exec.Command(self, "--city", cityPath, "dolt", "restart")
+	// `gc dolt restart` is a pack command whose script only accepts
+	// [--force]; a --city flag would be handed to it verbatim and rejected
+	// (exit 64), so the city is passed by cwd and GC_CITY_PATH instead.
+	cmd := exec.Command(self, managedDoltRestartArgs()...)
+	cmd.Dir = cityPath
 	cmd.Env = append(os.Environ(), "GC_CITY_PATH="+cityPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -37,6 +41,10 @@ var restartManagedDoltAfterPark = func(cityPath string, out io.Writer) error {
 	}
 	return nil
 }
+
+// managedDoltRestartArgs is the exact argv (after the binary) used to restart
+// the managed server: the pack command with no extra flags.
+func managedDoltRestartArgs() []string { return []string{"dolt", "restart"} }
 
 // newControllerConfigEditor builds the supervisor's city.toml editor with the
 // managed-server restart installed, so `gc rig suspend/resume` over the API

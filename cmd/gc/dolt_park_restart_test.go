@@ -24,6 +24,16 @@ func stubDoltRestart(t *testing.T) *int {
 	return &calls
 }
 
+// The pack script behind `gc dolt restart` accepts only [--force]; any other
+// argument (a --city flag, for one) makes it exit 64 and the stale listing
+// survives, which is exactly the outage this restart exists to prevent.
+func TestManagedDoltRestartArgsCarryNoFlags(t *testing.T) {
+	args := managedDoltRestartArgs()
+	if len(args) != 2 || args[0] != "dolt" || args[1] != "restart" {
+		t.Fatalf("args = %v, want [dolt restart]", args)
+	}
+}
+
 func TestRigsForBeadsLifecycleInitSkipsSuspendedAndPathless(t *testing.T) {
 	cfg := &config.City{Rigs: []config.Rig{
 		{Name: "active", Path: "/r/active"},
