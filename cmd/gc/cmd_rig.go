@@ -991,6 +991,10 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	}
 	if moved {
 		fmt.Fprintf(stdout, "Parked dolt database of rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+		if err := restartManagedDoltAfterPark(cityPath, stdout); err != nil {
+			fmt.Fprintf(stderr, "gc rig suspend: database parked but the server still lists it: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	return 0
 }
@@ -1113,6 +1117,10 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 	}
 	if moved {
 		fmt.Fprintf(stdout, "Restored dolt database of rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+		if err := restartManagedDoltAfterPark(cityPath, stdout); err != nil {
+			fmt.Fprintf(stderr, "gc rig resume: database restored but the server does not see it yet, rig left suspended: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if err := saveSuspensionState(fs, cityPath, st); err != nil {

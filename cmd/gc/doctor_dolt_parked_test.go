@@ -21,6 +21,7 @@ func parkedCheckCity(t *testing.T) (string, *config.City) {
 	t.Helper()
 	t.Setenv(doltpark.EnvParkOnSuspend, "")
 	t.Setenv(doltpark.EnvDataDir, "")
+	stubDoltRestart(t)
 	cityPath := t.TempDir()
 	mk := func(parts ...string) {
 		if err := os.MkdirAll(filepath.Join(parts...), 0o755); err != nil {

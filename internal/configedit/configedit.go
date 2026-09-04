@@ -75,6 +75,25 @@ type Editor struct {
 	mu       sync.Mutex
 	tomlPath string
 	fs       fsys.FS
+	// afterDoltMove runs after a rig's Dolt database was parked or restored.
+	// The managed server enumerates its data directory only at startup, so
+	// the owner (cmd/gc) installs a restart here; nil means no restart.
+	afterDoltMove func() error
+}
+
+// SetAfterDoltMoveHook installs the action run after SuspendRig/ResumeRig
+// moved a Dolt database (typically a managed-server restart).
+func (e *Editor) SetAfterDoltMoveHook(hook func() error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.afterDoltMove = hook
+}
+
+func (e *Editor) runAfterDoltMove(moved bool) error {
+	if !moved || e.afterDoltMove == nil {
+		return nil
+	}
+	return e.afterDoltMove()
 }
 
 // NewEditor creates an Editor for the city.toml at the given path.
@@ -689,8 +708,12 @@ func (e *Editor) SuspendRig(name string) error {
 	}
 	// Park after the state is durable: a failed move leaves the rig
 	// suspended with its database still served, never the reverse.
-	if _, err := ParkRigDatabase(cityPath, rig); err != nil {
+	moved, err := ParkRigDatabase(cityPath, rig)
+	if err != nil {
 		return fmt.Errorf("rig %q suspended, but parking its dolt database failed: %w", name, err)
+	}
+	if err := e.runAfterDoltMove(moved); err != nil {
+		return fmt.Errorf("rig %q suspended and its dolt database parked, but the server restart failed: %w", name, err)
 	}
 	return nil
 }
@@ -764,8 +787,12 @@ func (e *Editor) ResumeRig(name string) error {
 	cityPath := filepath.Dir(e.tomlPath)
 	// Unpark before the state flips: an active rig must never be left
 	// without its database.
-	if _, err := UnparkRigDatabase(cityPath, rig); err != nil {
+	moved, err := UnparkRigDatabase(cityPath, rig)
+	if err != nil {
 		return fmt.Errorf("rig %q not resumed: restoring its dolt database failed: %w", name, err)
+	}
+	if err := e.runAfterDoltMove(moved); err != nil {
+		return fmt.Errorf("rig %q not resumed: dolt database restored but the server restart failed: %w", name, err)
 	}
 	f := false
 	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -132,6 +133,7 @@ func (c *doltParkedDatabasesCheck) Fix(ctx *doctor.CheckContext) error {
 		return err
 	}
 	var failures []string
+	movedAny := false
 	for _, d := range drifts {
 		rig := findConfigRig(c.cfg, d.rig)
 		if rig == nil || d.status == doltpark.Conflict {
@@ -151,8 +153,20 @@ func (c *doltParkedDatabasesCheck) Fix(ctx *doctor.CheckContext) error {
 			failures = append(failures, fmt.Sprintf("%s/%s: %v", d.rig, d.db, mvErr))
 			continue
 		}
-		if moved && ctx != nil && ctx.Output != nil {
-			fmt.Fprintf(ctx.Output, "  %s dolt database %s (rig %s)\n", verb, d.db, d.rig) //nolint:errcheck // best-effort doctor output
+		if moved {
+			movedAny = true
+			if ctx != nil && ctx.Output != nil {
+				fmt.Fprintf(ctx.Output, "  %s dolt database %s (rig %s)\n", verb, d.db, d.rig) //nolint:errcheck // best-effort doctor output
+			}
+		}
+	}
+	if movedAny {
+		var out io.Writer
+		if ctx != nil {
+			out = ctx.Output
+		}
+		if err := restartManagedDoltAfterPark(c.cityPath, out); err != nil {
+			failures = append(failures, "server restart: "+err.Error())
 		}
 	}
 	if len(failures) > 0 {

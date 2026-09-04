@@ -17,6 +17,7 @@ func parkRigCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv(doltpark.EnvParkOnSuspend, "")
 	t.Setenv(doltpark.EnvDataDir, "")
+	stubDoltRestart(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "frontend")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
