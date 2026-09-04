@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -31,6 +32,36 @@ func TestManagedDoltRestartArgsCarryNoFlags(t *testing.T) {
 	args := managedDoltRestartArgs()
 	if len(args) != 2 || args[0] != "dolt" || args[1] != "restart" {
 		t.Fatalf("args = %v, want [dolt restart]", args)
+	}
+}
+
+// After `gc dolt restart` the published port file is empty for a few seconds
+// (measured: empty at t+0, 42188 by t+5s); bd dials 127.0.0.1:0 meanwhile.
+func TestWaitForPublishedDoltPortWaitsForANonZeroPort(t *testing.T) {
+	dir := t.TempDir()
+	portFile := filepath.Join(dir, "dolt-server.port")
+	if err := os.WriteFile(portFile, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if waitForPublishedDoltPort(portFile, 300*time.Millisecond) {
+		t.Fatal("empty port file must not count as published")
+	}
+	if err := os.WriteFile(portFile, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if waitForPublishedDoltPort(portFile, 300*time.Millisecond) {
+		t.Fatal("port 0 must not count as published")
+	}
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		_ = os.WriteFile(portFile, []byte("42188\n"), 0o644)
+	}()
+	start := time.Now()
+	if !waitForPublishedDoltPort(portFile, 5*time.Second) {
+		t.Fatal("port written during the wait must be seen")
+	}
+	if time.Since(start) < 300*time.Millisecond {
+		t.Fatal("returned before the port was written")
 	}
 }
 

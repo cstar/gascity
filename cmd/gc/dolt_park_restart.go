@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -39,7 +41,34 @@ var restartManagedDoltAfterPark = func(cityPath string, out io.Writer) error {
 	if out != nil {
 		fmt.Fprintf(out, "Restarted managed dolt server so it re-reads %s\n", doltpark.DefaultLayout(cityPath).DataDir) //nolint:errcheck // best-effort output
 	}
+	// The restart clears the published .beads/dolt-server.port files and the
+	// supervisor republishes them a few seconds later; until then any bd call
+	// dials 127.0.0.1:0. Wait so `gc rig unpark && bd ...` is race-free.
+	if !waitForPublishedDoltPort(filepath.Join(cityPath, ".beads", "dolt-server.port"), doltPortRepublishTimeout) {
+		if out != nil {
+			fmt.Fprintf(out, "warning: %s not republished within %s; bd may need a moment\n", ".beads/dolt-server.port", doltPortRepublishTimeout) //nolint:errcheck // best-effort output
+		}
+	}
 	return nil
+}
+
+const doltPortRepublishTimeout = 30 * time.Second
+
+// waitForPublishedDoltPort polls until portFile holds a non-empty, non-zero
+// port or the timeout elapses. It reports whether a port was seen.
+func waitForPublishedDoltPort(portFile string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if data, err := os.ReadFile(portFile); err == nil {
+			if p := strings.TrimSpace(string(data)); p != "" && p != "0" {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // managedDoltRestartArgs is the exact argv (after the binary) used to restart
