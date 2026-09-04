@@ -45,7 +45,6 @@ func (c *doltParkedDatabasesCheck) drifts() ([]doltParkDrift, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading suspension state: %w", err)
 	}
-	suspended := buildEffectiveSuspendedRigNames(c.cfg, st)
 	var out []doltParkDrift
 	for i := range c.cfg.Rigs {
 		rig := &c.cfg.Rigs[i]
@@ -57,10 +56,12 @@ func (c *doltParkedDatabasesCheck) drifts() ([]doltParkDrift, error) {
 		if err != nil {
 			continue // reserved or malformed name: nothing to park, nothing to report
 		}
-		isSuspended := suspended[rig.Name]
-		wrongSide := (isSuspended && status == doltpark.Served) || (!isSuspended && status == doltpark.Parked)
+		// "suspended" here means "wants its database parked": a suspended rig
+		// with a keep-served preference (gc rig unpark) counts as served.
+		wantParked := configedit.RigDatabaseShouldBeParked(st, rig)
+		wrongSide := (wantParked && status == doltpark.Served) || (!wantParked && status == doltpark.Parked)
 		if wrongSide || status == doltpark.Conflict {
-			out = append(out, doltParkDrift{rig: rig.Name, db: db, suspended: isSuspended, status: status})
+			out = append(out, doltParkDrift{rig: rig.Name, db: db, suspended: wantParked, status: status})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].rig < out[j].rig })

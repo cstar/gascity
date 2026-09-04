@@ -703,7 +703,9 @@ func (e *Editor) SuspendRig(name string) error {
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
-	if err := suspensionstate.SetRigSuspended(e.fs, cityPath, name, &t); err != nil {
+	// A fresh suspend drops any keep-served preference left by `gc rig
+	// unpark`: the operator asked for the default, parked, state.
+	if err := SetRigSuspensionState(e.fs, cityPath, name, &t, nil); err != nil {
 		return err
 	}
 	// Park after the state is durable: a failed move leaves the rig
@@ -795,7 +797,28 @@ func (e *Editor) ResumeRig(name string) error {
 		return fmt.Errorf("rig %q not resumed: dolt database restored but the server restart failed: %w", name, err)
 	}
 	f := false
-	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+	return SetRigSuspensionState(e.fs, cityPath, name, &f, nil)
+}
+
+// SetRigSuspensionState records a rig's suspension preference and its
+// keep-served database preference together and saves the runtime state.
+// Either pointer may be nil to clear that preference.
+func SetRigSuspensionState(fs fsys.FS, cityPath, name string, suspended, databaseServed *bool) error {
+	st, err := suspensionstate.Load(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	suspensionstate.SetRig(&st, name, suspended)
+	suspensionstate.SetRigDatabaseServed(&st, name, databaseServed)
+	return suspensionstate.Save(fs, cityPath, st)
+}
+
+// RigDatabaseShouldBeParked is the single policy line: a database is parked
+// only when its rig is effectively suspended and carries no keep-served
+// preference.
+func RigDatabaseShouldBeParked(st suspensionstate.State, rig *config.Rig) bool {
+	return suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) &&
+		!suspensionstate.RigDatabaseServed(st, rig.Name)
 }
 
 // SuspendCity records an explicit "suspended" preference for the city

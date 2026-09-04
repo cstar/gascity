@@ -201,7 +201,7 @@ func TestRigAnywhere_CmdRigSuspendFromRigDir(t *testing.T) {
 			setCwd(t, fx.workDir)
 
 			var stdout, stderr bytes.Buffer
-			code := cmdRigSuspend(nil, &stdout, &stderr)
+			code := cmdRigSuspend(nil, false, &stdout, &stderr)
 			if code != 0 {
 				t.Fatalf("cmdRigSuspend() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}
