@@ -48,12 +48,32 @@ var ErrBDSilentFallback = errors.New("bd silent fallback to on-disk auto-import"
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
 type Bead struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`     // "open", "in_progress", "closed"
-	Type      string    `json:"issue_type"` // "task" default; matches bd wire format
-	Priority  *int      `json:"priority,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"` // "open", "in_progress", "closed"
+	// UpstreamStatus carries the status EXACTLY as the upstream store reported
+	// it, before mapBdStatus folds everything outside {closed,in_progress} into
+	// "open". It exists because that fold is lossy in one direction that matters:
+	// a bead parked `status=deferred` with NO `defer_until` (the standard
+	// human-gate claim park) is indistinguishable from a live open bead by the
+	// time the supervisor sees it — Status=="open" and IsDeferred() is false
+	// because DeferUntil is nil. Counting such a bead as live assigned work makes
+	// a poolDesired=1 singleton cycle between two claimants and strip the live
+	// sibling's claim (an-74m).
+	//
+	// Observational only: NOT persisted (`json:"-"`), and deliberately scoped to
+	// a single consumer — the supervisor's assigned-work list assembly in
+	// cmd/gc/build_desired_state.go. It is a safety net for dateless parks; the
+	// primary signal is a well-formed park carrying a future DeferUntil, read via
+	// IsDeferred.
+	//
+	// DELETE THIS FIELD when an-p2r4 lands. That bead removes the mapBdStatus
+	// collapse itself (~308 call sites), at which point Status carries the raw
+	// value and this field is pure debt.
+	UpstreamStatus string    `json:"-"`
+	Type           string    `json:"issue_type"` // "task" default; matches bd wire format
+	Priority       *int      `json:"priority,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 	// UpdatedAt is zero for legacy beads; UpdatedBefore falls back to CreatedAt.
 	UpdatedAt   time.Time `json:"updated_at,omitempty,omitzero"`
 	Assignee    string    `json:"assignee,omitempty"`
@@ -289,6 +309,28 @@ func HasReadyExcludedLabel(b Bead) bool {
 // ready) and cmd_hook.isFutureDeferredHookCandidate.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.DeferUntil != nil && b.DeferUntil.After(now)
+}
+
+// EffectiveUpstreamStatus returns the best available raw upstream status for b.
+//
+// UpstreamStatus is only populated by the store read paths that call
+// mapBdStatus. A Bead built any other way — MemStore, a direct literal, a
+// Create round-trip — leaves it empty, and an empty value means "the raw status
+// was never captured", NOT "the raw status was empty". Comparing an unset field
+// against a populated one fabricates differences: a no-op event over a
+// MemStore-primed cache would read as a mutation.
+//
+// So unset falls back to Status, which is the only truth those beads carry. The
+// fallback is also conservative in the direction that matters: a bead with no
+// captured raw status can never be mistaken for a park, and a cached bead that
+// predates the field still sees a genuine transition into "deferred".
+//
+// Removed with UpstreamStatus when an-p2r4 lands.
+func EffectiveUpstreamStatus(b Bead) string {
+	if b.UpstreamStatus != "" {
+		return b.UpstreamStatus
+	}
+	return b.Status
 }
 
 func isReadyBlockingDependencyType(t string) bool {

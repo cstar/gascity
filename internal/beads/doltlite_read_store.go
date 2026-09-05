@@ -1370,6 +1370,8 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		p := int(priority.Int64)
 		b.Priority = &p
 	}
+	// an-74m: capture the pre-fold value before the in-place remap discards it.
+	b.UpstreamStatus = b.Status
 	b.Status = mapBdStatus(b.Status)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)
 	b.UpdatedAt = parseDBTime(updatedRaw).Truncate(time.Second)

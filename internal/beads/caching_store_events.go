@@ -420,6 +420,10 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	}
 	if hasCacheEventField(fields, "status") {
 		merged.Status = patch.Status
+		// an-74m: carry the raw status with the mapped one. If only Status moved,
+		// a park event would land as Status="open" over a stale
+		// UpstreamStatus="deferred" (or vice versa) and the two would disagree.
+		merged.UpstreamStatus = patch.UpstreamStatus
 	}
 	if hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type") {
 		merged.Type = patch.Type
@@ -645,6 +649,16 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 	if !ok {
 		return Bead{}, nil, fmt.Errorf("missing bead id")
 	}
+	// an-74m: this path unmarshals the wire bead directly, with no mapBdStatus
+	// pass, so an event carries the RAW upstream status where every store path
+	// carries the folded one. Split them here so the event and reconcile paths
+	// agree about the same bead — otherwise a cached bead's Status depends on
+	// which path last wrote it. Guarded on the field actually being present: a
+	// patch that does not carry `status` must not be given a fabricated "open".
+	if hasCacheEventField(fields, "status") {
+		b.UpstreamStatus = b.Status
+		b.Status = mapBdStatus(b.Status)
+	}
 	return b, fields, nil
 }
 
@@ -687,6 +701,14 @@ func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	if old.ID != fresh.ID ||
 		old.Title != fresh.Title ||
 		old.Status != fresh.Status ||
+		// an-74m: without this the cache diff cannot see open -> dateless-deferred
+		// — mapBdStatus folds both sides to "open" and DeferUntil is nil on both,
+		// so every other compared field is equal and the reconcile records
+		// updates=0. The controller reads the CACHED handle, so the fix works only
+		// on the live path nobody uses unless this comparison carries it.
+		// Compared through EffectiveUpstreamStatus so an unset field (a bead that
+		// never passed a store read path) does not read as a difference.
+		EffectiveUpstreamStatus(old) != EffectiveUpstreamStatus(fresh) ||
 		old.Type != fresh.Type ||
 		!intPtrEqual(old.Priority, fresh.Priority) ||
 		!old.CreatedAt.Equal(fresh.CreatedAt) ||
