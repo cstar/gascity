@@ -2042,6 +2042,53 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 	}
 }
 
+// isClaimParkedWork reports whether b is parked against work-counting, and so
+// must not be counted as live assigned work by pool demand.
+//
+// Two park axes exist in this city and they are ORTHOGONAL BY DESIGN — the
+// an-74m ruling (Q1) declined to unify them, because they govern different
+// subsystems:
+//
+//   - CLAIM park (this function): keeps the assignee, tells the SUPERVISOR the
+//     bead is not live work. Signalled by defer_until / status=deferred.
+//   - ROUTING park (gc.do_not_auto_route, paired with a cleared gc.routed_to):
+//     tells the FEEDERS not to hand the bead out. Read nowhere here.
+//
+// A bead can be in either, both, or neither. Do not collapse them.
+//
+// The date is the primary and authoritative signal: beads.IsDeferred is the
+// same rule bin/stale-claim-reaper.sh applies (PARK_DEFS, a8bb465), including
+// its deliberate treatment of a PAST date as a LAPSED park that is live work
+// again. When a date is present it decides, full stop.
+//
+// The raw upstream status is the safety net, and only for the dateless case:
+// the standard human-gate park writes status=deferred with NO defer_until, and
+// IsDeferred is structurally blind to it (DeferUntil is nil). mapBdStatus has
+// already folded that status to "open" by the time it reaches here, so
+// UpstreamStatus is the only surviving evidence.
+//
+// Removed with beads.Bead.UpstreamStatus when an-p2r4 lands.
+func isClaimParkedWork(b beads.Bead, now time.Time) bool {
+	if beads.IsDeferred(b, now) {
+		return true
+	}
+	if b.DeferUntil != nil {
+		// Dated but lapsed — live work again. The raw status does not override a
+		// date that has run out; bd never reopens a lapsed park on its own, so
+		// status=deferred would otherwise hold it parked forever.
+		return false
+	}
+	if beads.EffectiveUpstreamStatus(b) != "deferred" {
+		return false
+	}
+	// Dateless park. The two signals disagree — IsDeferred says live, the raw
+	// status says parked — and that disagreement is precisely the malformed-park
+	// specimen this net exists for. Log it: the durable fix is for the park
+	// writer to stamp a future defer_until.
+	log.Printf("assigned-work: bead %s is parked status=deferred with no defer_until; excluding from live work counting. Park writers should stamp a future defer_until (an-74m)", b.ID)
+	return true
+}
+
 // appendWorkUnique appends b to the aligned dst/stores/storeRefs slices unless
 // it is a session bead or already seen. It reports whether the bead was
 // actually appended, so ready-pass callers can record readiness only for beads
@@ -2055,6 +2102,14 @@ func appendWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]str
 	// idle nudge filters messages locally since mail nudging is handled
 	// separately by the mail system.
 	if b.Type == sessionBeadType {
+		return false
+	}
+	// an-74m: a claim-parked bead is not live assigned work. This is the list
+	// assembly every assigned-work pass funnels through, and it is the site that
+	// matters: excluding further downstream (assignedWorkAssigneeSet, which only
+	// builds the ready-skip assignee set) leaves the pool-demand list still
+	// counting the bead, so the singleton keeps cycling.
+	if isClaimParkedWork(b, time.Now()) {
 		return false
 	}
 	if _, ok := seen[b.ID]; ok {
