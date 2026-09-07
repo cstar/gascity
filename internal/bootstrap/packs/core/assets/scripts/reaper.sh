@@ -1243,9 +1243,16 @@ if [ -d "$CITY_BEADS_DIR" ]; then
                     BATCH_COUNT=$(printf '%s\n' "$BATCH_IDS" | grep -c . || true)
                     [ "$BATCH_COUNT" -gt 0 ] || break
                     SQL_IDS=$(printf '%s\n' "$BATCH_IDS" | sed "s/.*/'&'/" | tr '\n' ',' | sed 's/,$//')
+                    # Two DELETEs on dependencies, never `issue_id IN (...) OR
+                    # depends_on_issue_id IN (...)`: both columns carry ON DELETE
+                    # CASCADE foreign keys to issues, and Dolt's planner never
+                    # finishes the OR form on that table (measured on a live hq:
+                    # split shapes 134-253ms, OR form still running after 35min,
+                    # unkillable, and the wedged statement pins the server).
                     dolt_sql -r csv -q "USE \`${CITY_DB}\`;
 DELETE FROM labels WHERE issue_id IN (${SQL_IDS});
-DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS}) OR depends_on_issue_id IN (${SQL_IDS});
+DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS});
+DELETE FROM dependencies WHERE depends_on_issue_id IN (${SQL_IDS});
 DELETE FROM issues WHERE id IN (${SQL_IDS});
 CALL DOLT_COMMIT('-A', '-m', 'reaper: session_beads_pruned=${BATCH_COUNT} type=session age>${SESSION_AGE_H}h', '--author', 'reaper <reaper@gascity.local>');" >/dev/null \
                         || { record_anomaly "session" "SQL cascade failed at offset $TOTAL"; break; }
