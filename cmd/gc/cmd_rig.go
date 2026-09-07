@@ -12,12 +12,14 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -57,6 +59,8 @@ are scoped to rigs via their "dir" field.`,
 		newRigSetEndpointCmd(stdout, stderr),
 		newRigStatusCmd(stdout, stderr),
 		newRigSuspendCmd(stdout, stderr),
+		newRigParkCmd(stdout, stderr),
+		newRigUnparkCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -864,7 +868,7 @@ func rigBeadsStatus(fs fsys.FS, dir string) string {
 }
 
 func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	var jsonOutput bool
+	var jsonOutput, keepDatabase bool
 	cmd := &cobra.Command{
 		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
@@ -872,8 +876,11 @@ func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 (.gc/runtime/suspension-state.json).
 
 All agents scoped to the suspended rig are effectively suspended —
-the reconciler skips them and gc hook returns empty. The rig's beads
-database remains accessible. Use "gc rig resume" to restore.
+the reconciler skips them and gc hook returns empty. The rig's Dolt
+database is parked out of the managed server's data directory
+(.beads/dolt -> .beads/dolt-suspended) so the server stops serving and
+enumerating it; set GC_DOLT_PARK_ON_SUSPEND=0 to leave it served.
+Use "gc rig resume" to restore both.
 
 Suspension state is stored in the runtime directory, not city.toml,
 so it is local to this machine and does not need to be committed.`,
@@ -886,7 +893,7 @@ so it is local to this machine and does not need to be committed.`,
 				} else if ctx, err := resolveContext(); err == nil {
 					rigName = ctx.RigName
 				}
-				if cmdRigSuspend(args, io.Discard, stderr) != 0 {
+				if cmdRigSuspend(args, keepDatabase, io.Discard, stderr) != 0 {
 					return errExit
 				}
 				return writeManagementActionJSON(stdout, managementActionResult{
@@ -897,7 +904,7 @@ so it is local to this machine and does not need to be committed.`,
 					Suspended: managementBoolPtr(true),
 				})
 			}
-			if cmdRigSuspend(args, stdout, stderr) != 0 {
+			if cmdRigSuspend(args, keepDatabase, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -905,11 +912,12 @@ so it is local to this machine and does not need to be committed.`,
 		ValidArgsFunction: completeRigNames,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	cmd.Flags().BoolVar(&keepDatabase, "keep-database", false, "Keep the rig's Dolt database served (same as a later `gc rig unpark`)")
 	return cmd
 }
 
 // cmdRigSuspend is the CLI entry point for suspending a rig.
-func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
+func cmdRigSuspend(args []string, keepDatabase bool, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -924,7 +932,9 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	if c := apiClient(cityPath); c != nil {
+	// --keep-database cannot travel over the rig-action API, so it always
+	// takes the direct path.
+	if c := apiClient(cityPath); c != nil && !keepDatabase {
 		err := c.SuspendRig(rigName)
 		if err == nil {
 			fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
@@ -936,12 +946,19 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		}
 		// Connection error — fall through to direct mutation.
 	}
-	return doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr)
+	return doRigSuspendWithOptions(fsys.OSFS{}, cityPath, rigName, keepDatabase, stdout, stderr)
 }
 
-// doRigSuspend records rig suspension in the runtime state file.
-// Accepts an injected FS for testability.
+// doRigSuspend records rig suspension in the runtime state file and parks
+// the rig's Dolt database. Accepts an injected FS for testability.
 func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer) int {
+	return doRigSuspendWithOptions(fs, cityPath, rigName, false, stdout, stderr)
+}
+
+// doRigSuspendWithOptions is doRigSuspend with the --keep-database choice:
+// when keepDatabase is set the database stays served and the preference is
+// recorded so `gc doctor --fix` does not park it later.
+func doRigSuspendWithOptions(fs fsys.FS, cityPath, rigName string, keepDatabase bool, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
@@ -949,14 +966,14 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	found := false
-	for _, r := range cfg.Rigs {
-		if r.Name == rigName {
-			found = true
+	var rig *config.Rig
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == rigName {
+			rig = &cfg.Rigs[i]
 			break
 		}
 	}
-	if !found {
+	if rig == nil {
 		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig suspend", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -971,6 +988,12 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		fmt.Fprintf(stdout, "Rig '%s' is already suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	var keepServed *bool
+	if keepDatabase {
+		t := true
+		keepServed = &t
+	}
+	suspensionstate.SetRigDatabaseServed(&st, rigName, keepServed)
 
 	if err := saveSuspensionState(fs, cityPath, st); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -978,6 +1001,24 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 	}
 
 	fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+	if keepDatabase {
+		fmt.Fprintf(stdout, "Dolt database of rig '%s' stays served (--keep-database)\n", rigName) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	// State first, then the database: a failed move leaves the rig suspended
+	// with its database still served, never an active rig without one.
+	moved, err := configedit.ParkRigDatabase(cityPath, rig)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig suspend: parking dolt database: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if moved {
+		fmt.Fprintf(stdout, "Parked dolt database of rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+		if err := restartManagedDoltAfterPark(cityPath, stdout); err != nil {
+			fmt.Fprintf(stderr, "gc rig suspend: database parked but the server still lists it: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	return 0
 }
 
@@ -1067,14 +1108,14 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	found := false
-	for _, r := range cfg.Rigs {
-		if r.Name == rigName {
-			found = true
+	var rig *config.Rig
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == rigName {
+			rig = &cfg.Rigs[i]
 			break
 		}
 	}
-	if !found {
+	if rig == nil {
 		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig resume", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1088,6 +1129,24 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 	if !resumeRigInState(&st, rigName) {
 		fmt.Fprintf(stdout, "Rig '%s' is not suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
+	}
+	// An active rig's database is served by definition; drop any
+	// keep-served preference left by `gc rig unpark`.
+	suspensionstate.SetRigDatabaseServed(&st, rigName, nil)
+
+	// Database first, then the state: an active rig must never be left
+	// without its database.
+	moved, err := configedit.UnparkRigDatabase(cityPath, rig)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig resume: restoring dolt database: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if moved {
+		fmt.Fprintf(stdout, "Restored dolt database of rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+		if err := restartManagedDoltAfterPark(cityPath, stdout); err != nil {
+			fmt.Fprintf(stderr, "gc rig resume: database restored but the server does not see it yet, rig left suspended: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if err := saveSuspensionState(fs, cityPath, st); err != nil {

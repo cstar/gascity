@@ -18,6 +18,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltpark"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -74,6 +75,25 @@ type Editor struct {
 	mu       sync.Mutex
 	tomlPath string
 	fs       fsys.FS
+	// afterDoltMove runs after a rig's Dolt database was parked or restored.
+	// The managed server enumerates its data directory only at startup, so
+	// the owner (cmd/gc) installs a restart here; nil means no restart.
+	afterDoltMove func() error
+}
+
+// SetAfterDoltMoveHook installs the action run after SuspendRig/ResumeRig
+// moved a Dolt database (typically a managed-server restart).
+func (e *Editor) SetAfterDoltMoveHook(hook func() error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.afterDoltMove = hook
+}
+
+func (e *Editor) runAfterDoltMove(moved bool) error {
+	if !moved || e.afterDoltMove == nil {
+		return nil
+	}
+	return e.afterDoltMove()
 }
 
 // NewEditor creates an Editor for the city.toml at the given path.
@@ -677,12 +697,77 @@ func (e *Editor) SuspendRig(name string) error {
 	if err != nil {
 		return err
 	}
-	if !rigDeclared(cfg, name) {
+	rig := findRig(cfg, name)
+	if rig == nil {
 		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
-	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &t)
+	// A fresh suspend drops any keep-served preference left by `gc rig
+	// unpark`: the operator asked for the default, parked, state.
+	if err := SetRigSuspensionState(e.fs, cityPath, name, &t, nil); err != nil {
+		return err
+	}
+	// Park after the state is durable: a failed move leaves the rig
+	// suspended with its database still served, never the reverse.
+	moved, err := ParkRigDatabase(cityPath, rig)
+	if err != nil {
+		return fmt.Errorf("rig %q suspended, but parking its dolt database failed: %w", name, err)
+	}
+	if err := e.runAfterDoltMove(moved); err != nil {
+		return fmt.Errorf("rig %q suspended and its dolt database parked, but the server restart failed: %w", name, err)
+	}
+	return nil
+}
+
+// findRig returns the declared rig named name, or nil.
+func findRig(cfg *config.City, name string) *config.Rig {
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == name {
+			return &cfg.Rigs[i]
+		}
+	}
+	return nil
+}
+
+// RigDatabaseLayout resolves the parking layout and Dolt database for a rig.
+// The empty database name means the rig has no store to move (no prefix, or
+// the rig is the city itself and lives in the reserved HQ store).
+func RigDatabaseLayout(cityPath string, rig *config.Rig) (doltpark.Layout, string) {
+	rigPath := strings.TrimSpace(rig.Path)
+	if rigPath != "" && !filepath.IsAbs(rigPath) {
+		rigPath = filepath.Join(cityPath, rigPath)
+	}
+	if rigPath != "" && filepath.Clean(rigPath) == filepath.Clean(cityPath) {
+		return doltpark.Layout{}, ""
+	}
+	return doltpark.DefaultLayout(cityPath), doltpark.DatabaseName(rigPath, rig.Prefix)
+}
+
+// ParkRigDatabase moves the rig's Dolt database out of the served data
+// directory (see package doltpark). It reports whether a move happened and is
+// a no-op when parking is disabled or the database is absent/already parked.
+func ParkRigDatabase(cityPath string, rig *config.Rig) (bool, error) {
+	if !doltpark.Enabled() {
+		return false, nil
+	}
+	layout, db := RigDatabaseLayout(cityPath, rig)
+	if db == "" {
+		return false, nil
+	}
+	return doltpark.Park(layout, db)
+}
+
+// UnparkRigDatabase is the inverse of ParkRigDatabase.
+func UnparkRigDatabase(cityPath string, rig *config.Rig) (bool, error) {
+	if !doltpark.Enabled() {
+		return false, nil
+	}
+	layout, db := RigDatabaseLayout(cityPath, rig)
+	if db == "" {
+		return false, nil
+	}
+	return doltpark.Unpark(layout, db)
 }
 
 // ResumeRig records an explicit "resumed" preference in the runtime
@@ -697,12 +782,43 @@ func (e *Editor) ResumeRig(name string) error {
 	if err != nil {
 		return err
 	}
-	if !rigDeclared(cfg, name) {
+	rig := findRig(cfg, name)
+	if rig == nil {
 		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
 	}
 	cityPath := filepath.Dir(e.tomlPath)
+	// Unpark before the state flips: an active rig must never be left
+	// without its database.
+	moved, err := UnparkRigDatabase(cityPath, rig)
+	if err != nil {
+		return fmt.Errorf("rig %q not resumed: restoring its dolt database failed: %w", name, err)
+	}
+	if err := e.runAfterDoltMove(moved); err != nil {
+		return fmt.Errorf("rig %q not resumed: dolt database restored but the server restart failed: %w", name, err)
+	}
 	f := false
-	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
+	return SetRigSuspensionState(e.fs, cityPath, name, &f, nil)
+}
+
+// SetRigSuspensionState records a rig's suspension preference and its
+// keep-served database preference together and saves the runtime state.
+// Either pointer may be nil to clear that preference.
+func SetRigSuspensionState(fs fsys.FS, cityPath, name string, suspended, databaseServed *bool) error {
+	st, err := suspensionstate.Load(fs, cityPath)
+	if err != nil {
+		return err
+	}
+	suspensionstate.SetRig(&st, name, suspended)
+	suspensionstate.SetRigDatabaseServed(&st, name, databaseServed)
+	return suspensionstate.Save(fs, cityPath, st)
+}
+
+// RigDatabaseShouldBeParked is the single policy line: a database is parked
+// only when its rig is effectively suspended and carries no keep-served
+// preference.
+func RigDatabaseShouldBeParked(st suspensionstate.State, rig *config.Rig) bool {
+	return suspensionstate.EffectiveRigSuspended(st, rig.Name, rig.EffectiveSuspendedOnStart()) &&
+		!suspensionstate.RigDatabaseServed(st, rig.Name)
 }
 
 // SuspendCity records an explicit "suspended" preference for the city

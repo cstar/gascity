@@ -181,7 +181,7 @@ func newControllerState(
 		cacheCtx:            ctx,
 		eventProv:           ep,
 		usageSink:           usageSinkForCity(cfg, cityPath),
-		editor:              configedit.NewEditor(fsys.OSFS{}, tomlPath),
+		editor:              newControllerConfigEditor(cityPath, tomlPath),
 		cityName:            cityName,
 		cityPath:            cityPath,
 		version:             version,

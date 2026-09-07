@@ -62,6 +62,35 @@ import (
 // values on write.
 type Override struct {
 	Suspended *bool `json:"suspended,omitempty"`
+	// DatabaseServed, when &true on a rig, keeps the rig's Dolt database
+	// served by the managed server even though the rig is suspended
+	// (`gc rig unpark`, `gc rig suspend --keep-database`). Absent or
+	// &false means a suspended rig's database is parked. Ignored for
+	// active rigs, whose database is always served.
+	DatabaseServed *bool `json:"database_served,omitempty"`
+}
+
+// RigDatabaseServed reports whether the rig carries an explicit
+// keep-served preference for its Dolt database.
+func RigDatabaseServed(st State, name string) bool {
+	r, ok := st.Rigs[name]
+	return ok && r.DatabaseServed != nil && *r.DatabaseServed
+}
+
+// SetRigDatabaseServed records (or clears, with nil) the keep-served
+// preference for a rig's Dolt database. The entry is removed when no
+// overrides remain so the JSON file stays minimal.
+func SetRigDatabaseServed(st *State, name string, served *bool) {
+	r := st.Rigs[name]
+	r.DatabaseServed = served
+	if r == (Override{}) {
+		delete(st.Rigs, name)
+		return
+	}
+	if st.Rigs == nil {
+		st.Rigs = make(map[string]Override)
+	}
+	st.Rigs[name] = r
 }
 
 // State is the runtime suspension state persisted to disk.

@@ -3275,12 +3275,14 @@ gc rig
 |------------|-------------|
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
+| [gc rig park](#gc-rig-park) | Park a suspended rig's Dolt database out of the managed server |
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
 | [gc rig set-endpoint](#gc-rig-set-endpoint) | Set the canonical endpoint ownership for a rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
 | [gc rig suspend](#gc-rig-suspend) | Suspend a rig (reconciler will skip its agents) |
+| [gc rig unpark](#gc-rig-unpark) | Serve a suspended rig's Dolt database again (rig stays suspended) |
 
 ## gc rig add
 
@@ -3352,6 +3354,16 @@ gc rig list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSON format |
+
+## gc rig park
+
+Move a suspended rig's Dolt database from the managed server's data
+directory to .beads/dolt-suspended and clear any keep-served preference.
+The rig must already be suspended; an active rig's database is never parked.
+
+```
+gc rig park [name]
+```
 
 ## gc rig remove
 
@@ -3459,8 +3471,11 @@ Suspend a rig by recording the suspension in the runtime state file
 (.gc/runtime/suspension-state.json).
 
 All agents scoped to the suspended rig are effectively suspended —
-the reconciler skips them and gc hook returns empty. The rig's beads
-database remains accessible. Use "gc rig resume" to restore.
+the reconciler skips them and gc hook returns empty. The rig's Dolt
+database is parked out of the managed server's data directory
+(.beads/dolt -&gt; .beads/dolt-suspended) so the server stops serving and
+enumerating it; set GC_DOLT_PARK_ON_SUSPEND=0 to leave it served.
+Use "gc rig resume" to restore both.
 
 Suspension state is stored in the runtime directory, not city.toml,
 so it is local to this machine and does not need to be committed.
@@ -3472,6 +3487,20 @@ gc rig suspend [name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+| `--keep-database` | bool |  | Keep the rig's Dolt database served (same as a later `gc rig unpark`) |
+
+## gc rig unpark
+
+Restore a suspended rig's Dolt database from .beads/dolt-suspended to the
+managed server's data directory and record a keep-served preference, so
+"gc doctor --fix" leaves it alone. The rig stays suspended: no agents, no
+orders. Use it to read the rig's beads or run a skipper against the rig.
+"gc rig park" reverses it; "gc rig suspend" (without --keep-database) also
+clears the preference and parks again.
+
+```
+gc rig unpark [name]
+```
 
 ## gc runtime
 

@@ -228,13 +228,9 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
-	for i := range cfg.Rigs {
-		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
-			continue
-		}
-		prefix := cfg.Rigs[i].EffectivePrefix()
-		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
-			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
+	for _, rig := range rigsForBeadsLifecycleInit(cfg, loadSuspensionStateBestEffort(cityPath)) {
+		if err := initAndHookDir(cityPath, rig.Path, rig.EffectivePrefix()); err != nil {
+			return fmt.Errorf("init rig %q beads: %w", rig.Name, err)
 		}
 	}
 	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
@@ -1196,10 +1192,7 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
-			continue
-		}
+	for _, rig := range rigsForBeadsLifecycleInit(cfg, loadSuspensionStateBestEffort(cityPath)) {
 		if err := waitForBeadsScopeReadyAfterRecovery(resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
 			return fmt.Errorf("rig %q store not ready: %w", rig.Name, err)
 		}
