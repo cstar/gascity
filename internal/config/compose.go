@@ -141,7 +141,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 }
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
-func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+func loadWithIncludesOptionsUncached(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)

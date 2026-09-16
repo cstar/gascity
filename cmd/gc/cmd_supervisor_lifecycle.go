@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
@@ -519,6 +520,11 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
+	// The supervisor is the long-lived process whose reconciler detects pack
+	// content edits through Provenance.Revision(); the per-process config memo
+	// (internal/config/load_memo.go) would hide those, so it stays off here.
+	// Every short-lived gc invocation (agent hooks, gc ready, ...) keeps it.
+	config.DisableLoadMemo()
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }
