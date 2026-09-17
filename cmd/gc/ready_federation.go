@@ -90,6 +90,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"sync"
 )
 
 // readyLeg is one federated source: the store, the name a failure reports it by,
@@ -323,14 +324,35 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 // nowhere to say "this is short", so a degraded leg here would be served as a
 // short array indistinguishable from "no work".
 func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
+	// The legs are read CONCURRENTLY and merged IN LEG ORDER. Each leg is a
+	// round trip to its own store (a Dolt connection per rig on a 15-rig city),
+	// so a serial walk paid the sum of the legs' latencies — measured 2026-09-17
+	// on portharbour as most of a 90 s `gc ready` — where the merge only needs
+	// the max. The merge rule (first leg to return an id wins) and the
+	// anti-fail-open rule (the first failing leg, in leg order, is the error)
+	// are unchanged: both are decided after every read has returned.
+	type legRead struct {
+		rows []beads.Bead
+		err  error
+	}
+	reads := make([]legRead, len(legs))
+	var wg sync.WaitGroup
+	for i, leg := range legs {
+		wg.Add(1)
+		go func(i int, store beads.Store) {
+			defer wg.Done()
+			rows, err := read(store)
+			reads[i] = legRead{rows: rows, err: err}
+		}(i, leg.store)
+	}
+	wg.Wait()
 	var merged []beads.Bead
 	seen := make(map[string]bool)
-	for _, leg := range legs {
-		rows, err := read(leg.store)
-		if err != nil {
+	for i, leg := range legs {
+		if err := reads[i].err; err != nil {
 			return nil, fmt.Errorf("%s store: %w", leg.label, err)
 		}
-		for _, b := range rows {
+		for _, b := range reads[i].rows {
 			if seen[b.ID] {
 				continue
 			}

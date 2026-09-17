@@ -4025,9 +4025,21 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil, nil
 	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
-	for _, rig := range cfg.Rigs {
+	// The rig stores are opened CONCURRENTLY. Each open is a Dolt connection
+	// plus the beads preflight for that scope (several seconds of round trips
+	// on a loaded server); a serial walk over a 15-rig city paid ~6 s per rig
+	// — measured 2026-09-17 on portharbour as ~85 s of a 90 s `gc ready` and
+	// the same again at supervisor boot. The city config is handed to the open
+	// so no store re-resolves it. Results are collected per rig and folded in
+	// cfg.Rigs order, so the failure list is deterministic and the map is
+	// identical to what the serial walk produced.
+	type rigOpen struct {
+		store beads.Store
+		err   error
+	}
+	opens := make([]rigOpen, len(cfg.Rigs))
+	var wg sync.WaitGroup
+	for i, rig := range cfg.Rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
 		// openStoreAtForCity would silently fall back to the city
@@ -4036,12 +4048,25 @@ func openStandaloneRigStores(cfg *config.City, cityPath string) (map[string]bead
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := openStoreAtForCity(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		wg.Add(1)
+		go func(i int, path string) {
+			defer wg.Done()
+			store, err := openStoreAtForCityWithConfig(path, cityPath, cfg)
+			opens[i] = rigOpen{store: store, err: err}
+		}(i, rig.Path)
+	}
+	wg.Wait()
+	stores := make(map[string]beads.Store, len(cfg.Rigs))
+	var failures []rigStoreOpenFailure
+	for i, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		stores[rig.Name] = store
+		if opens[i].err != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: opens[i].err})
+			continue
+		}
+		stores[rig.Name] = opens[i].store
 	}
 	if len(stores) == 0 {
 		return nil, failures
