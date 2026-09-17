@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
@@ -520,11 +519,14 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
-	// The supervisor is the long-lived process whose reconciler detects pack
-	// content edits through Provenance.Revision(); the per-process config memo
-	// (internal/config/load_memo.go) would hide those, so it stays off here.
-	// Every short-lived gc invocation (agent hooks, gc ready, ...) keeps it.
-	config.DisableLoadMemo()
+	// The per-process config memo (internal/config/load_memo.go) stays ON in
+	// the supervisor too: it is revalidated against the stamp (existence, size,
+	// mtime) of every source and every file under the config watch targets, so
+	// pack content edits still change Provenance.Revision() exactly as an
+	// uncached load would. With it off, every store open re-parsed the city and
+	// re-hashed the cached pack clones: measured 2026-09-17 at 110% CPU / 2 GB
+	// RSS for the supervisor alone on a 5-rig city, load avg 30, runtime probes
+	// timing out. GC_CITY_CONFIG_MEMO=0 in the supervisor env turns it back off.
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }
