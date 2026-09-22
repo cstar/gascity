@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -402,7 +403,7 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
-	dep, err := pinnedbeads.Current()
+	dep, err := pinnedIntegrationBeadsModule()
 	if err != nil {
 		return "", err
 	}
@@ -445,28 +446,34 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	}
 }
 
-func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+// Integration tests exercise GC through its CLI and do not link the Beads
+// library themselves. Resolve the full module (including Replace) from GC's
+// project graph rather than the integration binary's absent build-info entry.
+func pinnedIntegrationBeadsModule() (debug.Module, error) {
+	cmd := exec.Command("go", "list", "-m", "-json", pinnedbeads.Path)
 	cmd.Dir = findModuleRoot()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return debug.Module{}, fmt.Errorf("resolve pinned Beads module: %w\n%s", err, out)
 	}
-	version := strings.TrimSpace(string(out))
-	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	var dep debug.Module
+	if err := json.Unmarshal(out, &dep); err != nil {
+		return debug.Module{}, fmt.Errorf("decode pinned Beads module: %w", err)
 	}
-	return version, nil
+	if _, err := pinnedbeads.Manifest(dep); err != nil {
+		return debug.Module{}, err
+	}
+	return dep, nil
 }
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
+	dep, err := pinnedIntegrationBeadsModule()
 	if err != nil {
-		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
+		t.Fatalf("pinnedIntegrationBeadsModule: %v", err)
 	}
 	const want = "v1.3.0-rc.2"
-	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	if dep.Version != want {
+		t.Errorf("pinned module version = %q, want %q", dep.Version, want)
 	}
 }
 

@@ -532,3 +532,26 @@ func (f integrationShardFixture) runShardWithEnv(t *testing.T, shard string, ext
 	}, extraEnv...)
 	return cmd.CombinedOutput()
 }
+
+// The listing subprocess runs TestMain, so setup errors must survive the
+// runner's capture/retry and remain visible instead of looking like no tests.
+func TestIntegrationDiscoveryFailureIncludesDiagnostic(t *testing.T) {
+	fixture := newIntegrationShardFixture(t)
+	path := filepath.Join(fixture.binDir, "go")
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "panic: pinned dependency provenance unavailable"
+	script = []byte(strings.Replace(string(script), "  test)\n", "  test)\n    echo '"+marker+"'\n    exit 1\n", 1))
+	if err := os.WriteFile(path, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := fixture.runShard(t, "rest-smoke-2-of-2")
+	if err == nil {
+		t.Fatal("failed discovery accepted")
+	}
+	if !strings.Contains(string(out), marker) {
+		t.Fatalf("lost discovery failure: %s", out)
+	}
+}
