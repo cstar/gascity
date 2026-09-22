@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil/pinnedbeads"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -401,7 +403,7 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
+	dep, err := pinnedIntegrationBeadsModule()
 	if err != nil {
 		return "", err
 	}
@@ -412,11 +414,20 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	manifest, err := pinnedbeads.Manifest(dep)
+	if err != nil {
+		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(binDir, "go.mod"), []byte(manifest), 0o600); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("go", "build", "-mod=mod", "-tags", "gms_pure_go", "-o", filepath.Join(binDir, "bd"), pinnedbeads.Path+"/cmd/bd")
+	cmd.Dir = binDir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOWORK=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build pinned bd: %w\n%s", err, out)
+	}
+
 	return filepath.Join(binDir, "bd"), nil
 }
 
@@ -435,28 +446,34 @@ func pinnedBdStoreCommandRunner() beads.CommandRunner {
 	}
 }
 
-func pinnedIntegrationBeadsModuleVersion() (string, error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "github.com/steveyegge/beads")
+// Integration tests exercise GC through its CLI and do not link the Beads
+// library themselves. Resolve the full module (including Replace) from GC's
+// project graph rather than the integration binary's absent build-info entry.
+func pinnedIntegrationBeadsModule() (debug.Module, error) {
+	cmd := exec.Command("go", "list", "-m", "-json", pinnedbeads.Path)
 	cmd.Dir = findModuleRoot()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve github.com/steveyegge/beads module version: %w\n%s", err, out)
+		return debug.Module{}, fmt.Errorf("resolve pinned Beads module: %w\n%s", err, out)
 	}
-	version := strings.TrimSpace(string(out))
-	if version == "" {
-		return "", errors.New("github.com/steveyegge/beads module version is empty")
+	var dep debug.Module
+	if err := json.Unmarshal(out, &dep); err != nil {
+		return debug.Module{}, fmt.Errorf("decode pinned Beads module: %w", err)
 	}
-	return version, nil
+	if _, err := pinnedbeads.Manifest(dep); err != nil {
+		return debug.Module{}, err
+	}
+	return dep, nil
 }
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
+	dep, err := pinnedIntegrationBeadsModule()
 	if err != nil {
-		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
+		t.Fatalf("pinnedIntegrationBeadsModule: %v", err)
 	}
 	const want = "v1.3.0-rc.2"
-	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	if dep.Version != want {
+		t.Errorf("pinned module version = %q, want %q", dep.Version, want)
 	}
 }
 

@@ -19,6 +19,32 @@ import (
 // panic path, while process-termination APIs cannot be recovered by the
 // invocation wrapper.
 var allowedGCExitBypassSites = map[string]func(gcExitBypassSite) error{
+	// The private discovery child must expire even when a backend read and its
+	// deferred cleanup are stuck. Pin the whole autonomous lease callback;
+	// ordinary command exits must still pass through the metrics lifecycle.
+	"hook_ready_reader.go:serveNativeHookReadyEndpoint:os.Exit": func(site gcExitBypassSite) error {
+		if len(site.ancestors) != 7 {
+			return fmt.Errorf("reader exit is not a direct autonomous lease callback")
+		}
+		timer, ok := site.ancestors[3].(*ast.CallExpr)
+		assignment, assigned := site.ancestors[4].(*ast.AssignStmt)
+		function, declared := site.root.(*ast.FuncDecl)
+		if !ok || !assigned || !declared || function.Body == nil || assignment.Tok != token.DEFINE || expressionShape(assignment.Lhs) != "lease" || len(assignment.Rhs) != 1 || assignment.Rhs[0] != timer || site.ancestors[5] != function.Body || site.ancestors[6] != function {
+			return fmt.Errorf("reader lease is not a direct lease declaration in the private entrypoint")
+		}
+		want, err := parser.ParseExpr(`time.AfterFunc(hookWorkQueryTimeout, func() {
+			_ = os.Remove(endpoint)
+			_ = os.Remove(filepath.Dir(endpoint))
+			os.Exit(124)
+		})`)
+		if err != nil {
+			return err
+		}
+		if expressionShape([]ast.Expr{timer}) != expressionShape([]ast.Expr{want}) {
+			return fmt.Errorf("reader lease differs from the bounded, nonrecursive cleanup and exit-124 callback")
+		}
+		return nil
+	},
 	"cmd_supervisor.go:supervisorHardExit:os.Exit": func(site gcExitBypassSite) error {
 		if got := expressionShape(site.call.Args); got != "code" {
 			return fmt.Errorf("exit argument = %q, want %q", got, "code")

@@ -86,11 +86,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
-	"sync"
 )
 
 // readyLeg is one federated source: the store, the name a failure reports it by,

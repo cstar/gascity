@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil/execfixture"
 )
 
 // installFakeDelegatedSystemctl writes an executable `systemctl` shim into a fresh
@@ -69,10 +71,11 @@ func installFakeDelegatedSystemctlHangingVerbWithUnitState(t *testing.T, verb st
 	t.Helper()
 	dir := t.TempDir()
 	argsFile := filepath.Join(dir, "systemctl-args")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\ncase \" $* \" in *\" is-active \"*) exit %d ;; *\" %s \"*) exec sleep 5 ;; esac\nexit 0\n", argsFile, isActiveExit, verb)
+	script := fmt.Sprintf("#!/bin/sh\n[ \"$1\" = --gc-test-ready ] && exit 0\necho \"$@\" >> %q\ncase \" $* \" in *\" is-active \"*) exit %d ;; *\" %s \"*) exec sleep 5 ;; esac\nexit 0\n", argsFile, isActiveExit, verb)
 	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake systemctl: %v", err)
 	}
+	execfixture.PrimeExecutable(t, filepath.Join(dir, "systemctl"))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return argsFile
 }

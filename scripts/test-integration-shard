@@ -193,8 +193,10 @@ list_integration_tests() {
   # transient class; a second failure aborts the shard with the real reason.
   local out
   if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+    printf '%s\n' "$out" >&2
     echo "listing integration tests failed; retrying once" >&2
     if ! out="$(run_go_test -tags integration -list '^Test' "$pkg")"; then
+      printf '%s\n' "$out" >&2
       echo "listing integration tests failed twice; refusing to shard an unknown test set" >&2
       return 1
     fi

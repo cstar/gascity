@@ -1542,8 +1542,7 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    sh -c 'trap "exit 130" INT; : > "$1"; exec sleep 30' sh "%s"
     ;;
   *) exit 2 ;;
 esac
@@ -1557,7 +1556,8 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	// Wait until the adapter is blocked in the foreground sleep.
+	// The foreground child publishes readiness itself. A marker written by
+	// the adapter before forking can race cancellation with child startup.
 	readyDeadline := time.NewTimer(5 * time.Second)
 	defer readyDeadline.Stop()
 	readyPoll := time.NewTicker(10 * time.Millisecond)

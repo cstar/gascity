@@ -185,6 +185,7 @@ func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts readyOpts
 	var jsonOut bool
 	var includeEphemeral bool
+	var hookReader, serveHookReader string
 	cmd := &cobra.Command{
 		Use:   "ready",
 		Short: "List ready (claimable) work across every store in the city",
@@ -212,6 +213,16 @@ orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if serveHookReader != "" {
+				return serveNativeHookReadyEndpoint(serveHookReader, stderr)
+			}
+			if hookReader != "" {
+				rows, err := readHookReadyRemote(hookReader, opts)
+				if err != nil {
+					return err
+				}
+				return writeJSON(stdout, rows)
+			}
 			if cmdReady(opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -219,6 +230,10 @@ orchestration step runs as are claimable work here whether or not
 		},
 	}
 	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
+	cmd.Flags().StringVar(&hookReader, "hook-reader", "", "private invocation-scoped hook reader")
+	_ = cmd.Flags().MarkHidden("hook-reader")
+	cmd.Flags().StringVar(&serveHookReader, "serve-hook-reader", "", "private invocation-scoped hook server")
+	_ = cmd.Flags().MarkHidden("serve-hook-reader")
 	return cmd
 }
 
@@ -303,6 +318,12 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 // happened to fill the quota first rather than the top-N of the city — and the
 // larger a leg's backlog, the further its own rows are from the merged prefix.
 func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
+	return readyBeadsUsingReader(opts, func(status string) ([]beads.Bead, map[string]readyLeg, error) {
+		return readReadyCandidates(legs, status)
+	})
+}
+
+func readyBeadsUsingReader(opts readyOpts, read func(string) ([]beads.Bead, map[string]readyLeg, error)) ([]readyBead, error) {
 	// Every flag is validated before a single store is touched: a malformed
 	// query must not cost a city-wide federated read to be told it was
 	// malformed.
@@ -318,7 +339,7 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if err != nil {
 		return nil, err
 	}
-	items, owners, err := readReadyCandidates(legs, status)
+	items, owners, err := read(status)
 	if err != nil {
 		return nil, err
 	}

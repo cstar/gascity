@@ -16,8 +16,8 @@ package main
 //     so an out-of-tree provider cannot leak back here by accident;
 //   - the whole storage surface compiles identically with CGO on and off, so
 //     the pure-Go driver choice is a checked property rather than a comment;
-//   - the module graph carries no replace directive, so a build of this repo
-//     resolves the dependencies its manifest names and nothing else.
+//   - the module graph permits only the exact operator-approved fork replacement;
+//     no other module redirection or workspace can silently alter the build.
 //
 // The last two are what a downstream fork relies on. A fork appends its own
 // factory in its own tree; these arms are what keep the seam it appends to
@@ -201,15 +201,10 @@ func TestStorageSurfaceCompilesIdenticallyWithAndWithoutCGO(t *testing.T) {
 	}
 }
 
-// TestModuleGraphCarriesNoReplaceDirective is the module-graph guarantee a
-// downstream fork builds on: this repo's dependencies are exactly what its
-// manifest names, at released versions, with nothing redirected. It is the
-// tree-side companion to scripts/check-gomod-replace.sh's released-semver-only
-// policy — that script gates what a change adds, this arm gates the result.
-//
-// A replace this parser cannot read is a violation, not a pass: silently
-// ignoring a line we cannot parse is how a guard goes blind.
-func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
+// TestModuleGraphOnlyApprovedReplacements keeps the upstream no-redirection
+// guarantee except for the exact existing Beads fork approved by Éric on
+// 2026-09-22 (po-tnutc.22.1 / PR #15). Malformed directives still fail closed.
+func TestModuleGraphOnlyApprovedReplacements(t *testing.T) {
 	root := moduleRoot(t)
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
@@ -220,11 +215,47 @@ func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
 		t.Fatalf("go.mod has replace directives this guard cannot parse (lines %v); a manifest we cannot read is a violation, not a pass", malformed)
 	}
 	for _, directive := range directives {
-		t.Errorf("go.mod line %d replaces %q with %q; this module graph carries no replace directive, so a build resolves the dependencies the manifest names and nothing else",
+		if approvedForkBeadsReplacement(directive) {
+			continue
+		}
+		t.Errorf("go.mod line %d replaces %q with %q outside the exact operator-approved Beads fork",
 			directive.line, directive.oldPath, directive.newPath)
 	}
 	if anyGoWorkFile(t, root) {
 		t.Error("the tree commits a go.work; a workspace redirects the module graph for every go invocation started at or below it")
+	}
+}
+
+func approvedForkBeadsReplacement(d replaceDirective) bool {
+	return d.oldPath == "github.com/steveyegge/beads" && d.oldVersion == "" &&
+		d.newPath == "github.com/cstar/beads" && d.newVersion == "v1.0.6-0.20260917105420-f02fff7bb5e1"
+}
+
+func TestApprovedForkBeadsReplacementIsExact(t *testing.T) {
+	approved := replaceDirective{oldPath: "github.com/steveyegge/beads", newPath: "github.com/cstar/beads", newVersion: "v1.0.6-0.20260917105420-f02fff7bb5e1"}
+	if !approvedForkBeadsReplacement(approved) {
+		t.Fatal("approved tuple rejected")
+	}
+	for _, field := range []string{"source", "source version", "target", "target version", "local target"} {
+		t.Run(field, func(t *testing.T) {
+			altered := approved
+			switch field {
+			case "source":
+				altered.oldPath = "example.com/other"
+			case "source version":
+				altered.oldVersion = "v1.3.0-rc.2"
+			case "target":
+				altered.newPath = "github.com/other/beads"
+			case "target version":
+				altered.newVersion = "v1.0.6"
+			case "local target":
+				altered.newPath = "../beads"
+				altered.newVersion = ""
+			}
+			if approvedForkBeadsReplacement(altered) {
+				t.Fatalf("unauthorized replacement accepted: %+v", altered)
+			}
+		})
 	}
 }
 
