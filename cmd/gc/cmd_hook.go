@@ -428,6 +428,13 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// work_query, where both forms are the same string.
 	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
+	workQuery, closeReadyReader, err := prepareNativeHookReadyQuery(workQuery, cityPath, &a, topo)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: preparing native work reader: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer closeReadyReader()
+
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
 	// "no work" (issues #1496/#1497). Ordinary command errors are ignored by

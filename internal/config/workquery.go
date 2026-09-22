@@ -332,7 +332,7 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 }
 
 func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) string {
-	if topo.includeEphemeralReady() {
+	if topo.FederatedReady || topo.includeEphemeralReady() {
 		return `printf "[]"`
 	}
 	filter := legacyEphemeralReadyFilterJQ(
@@ -805,13 +805,10 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 		`fi; `
 }
 
-// ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
-// `bd query` because there is no federated form of it and it needs none: a
-// relocated class store has no bead-policy layer, so an orchestration wisp lands
-// there as a DURABLE row that the plain federated ready read already returns
-// (see splitEnv.mintWispWith). The ephemeral tier only exists where the policy
-// front door put the wisp somewhere a plain read cannot see it, which is the
-// single-store city.
+// ephemeralAssignedReadyProbeScript is the single-store bd-1.0.4 wisp tier.
+// The federated reader already reads both storage tiers on every leg, so an
+// additional workspace-only bd query cannot add ready work there. Besides
+// repeating the scan, it could surface a stale copy retained by a migration.
 //
 // It tries the fast dependency_count == 0 candidate first, then falls back to
 // a dependency_count > 0 candidate enriched via a real bd show --json call,
@@ -821,7 +818,7 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 // in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
 // pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
-	if topo.includeEphemeralReady() {
+	if topo.FederatedReady || topo.includeEphemeralReady() {
 		return ""
 	}
 	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
