@@ -97,7 +97,7 @@ func isCredentialHelperInvocation(args []string) bool {
 
 // packCommandsNeeded reports whether this invocation could route to or
 // display pack-provided commands. Packs cannot shadow core command names
-// (coreCommandNames enforces this), so when argv[1] is a core subcommand the
+// (coreCommandNames enforces this), so when args[0] is a core subcommand the
 // eager pack registration cannot change routing or behavior — and execution
 // of pack commands without eager registration is already covered by the
 // root RunE's tryPackCommandFallback. Skipping the eager pass on core-command

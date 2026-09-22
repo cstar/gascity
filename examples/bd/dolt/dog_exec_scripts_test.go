@@ -5296,12 +5296,14 @@ func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
 	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 	_ = writeBackupFakeRsync(t, binDir, 1)
 	timeoutLogPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+	for _, name := range []string{"timeout", "gtimeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
 `, shellQuote(timeoutLogPath)))
+	}
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 		"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
@@ -5359,12 +5361,14 @@ func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
 			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 			_ = writeBackupFakeRsync(t, binDir)
 			timeoutLogPath := filepath.Join(binDir, "timeout.log")
-			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
+			for _, name := range []string{"timeout", "gtimeout"} {
+				writeExecutable(t, filepath.Join(binDir, name), fmt.Sprintf(`#!/bin/sh
 printf 'timeout %%s\n' "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
 `, shellQuote(timeoutLogPath)))
+			}
 
 			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,

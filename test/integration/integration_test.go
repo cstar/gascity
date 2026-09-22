@@ -39,6 +39,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil/pinnedbeads"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
@@ -401,7 +402,7 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
-	version, err := pinnedIntegrationBeadsModuleVersion()
+	dep, err := pinnedbeads.Current()
 	if err != nil {
 		return "", err
 	}
@@ -412,11 +413,20 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
 	// INSTALLING.md): the pinned bd's `bd init` defaults to embedded Dolt,
 	// which a CGO_ENABLED=0 binary refuses at runtime.
-	cmd := exec.Command("go", "install", "-tags", "gms_pure_go", "github.com/steveyegge/beads/cmd/bd@"+version)
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOBIN="+binDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	manifest, err := pinnedbeads.Manifest(dep)
+	if err != nil {
+		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(binDir, "go.mod"), []byte(manifest), 0o600); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("go", "build", "-mod=mod", "-tags", "gms_pure_go", "-o", filepath.Join(binDir, "bd"), pinnedbeads.Path+"/cmd/bd")
+	cmd.Dir = binDir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOWORK=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build pinned bd: %w\n%s", err, out)
+	}
+
 	return filepath.Join(binDir, "bd"), nil
 }
 

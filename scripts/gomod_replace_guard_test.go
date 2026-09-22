@@ -62,6 +62,27 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		}
 	})
 
+	const approved = "github.com/steveyegge/beads => github.com/cstar/beads v1.0.6-0.20260917105420-f02fff7bb5e1"
+	for _, tc := range []struct {
+		name, body string
+		ok         bool
+	}{
+		{"approved fork", "replace " + approved, true},
+		{"approved fork block", "replace (\n\t" + approved + "\n)", true},
+		{"changed commit", "replace " + strings.ReplaceAll(approved, "f02fff7bb5e1", "f02fff7bb5e2"), false},
+		{"changed target", "replace " + strings.ReplaceAll(approved, "cstar/beads", "other/beads"), false},
+		{"changed source", "replace " + strings.ReplaceAll(approved, "steveyegge/beads", "other/beads"), false},
+		{"source version", "replace " + strings.ReplaceAll(approved, "beads =>", "beads v1.3.0-rc.2 =>"), false},
+		{"approved plus local", "replace " + approved + "\nreplace example.com/other => ../local", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := runScript(t, "module example.com/test\n\ngo 1.26.0\n"+tc.body+"\n")
+			if (code == 0) != tc.ok {
+				t.Fatalf("exit %d, want success=%v: %s", code, tc.ok, out)
+			}
+		})
+	}
+
 	pseudoVersionCases := []struct {
 		name  string
 		block string

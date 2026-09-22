@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil/execfixture"
 )
 
 // writeSpyScript creates a shell script that logs operations to a file and
@@ -25,6 +26,7 @@ func writeSpyScript(t *testing.T, logFile string) string {
 	// For "init" operations, it also creates .beads/ in the target dir
 	// (simulating bd init creating the directory, which wipes hooks).
 	content := `#!/bin/sh
+[ "$1" = --gc-test-ready ] && exit 0
 echo "$@" >> "` + logFile + `"
 case "$1" in
   init)
@@ -41,6 +43,7 @@ exit 0
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	execfixture.PrimeExecutable(t, script)
 	return script
 }
 

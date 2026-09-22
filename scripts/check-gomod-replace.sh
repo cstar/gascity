@@ -9,6 +9,8 @@
 # security fix from an unreleased commit). That override is a manual admin
 # bypass of this required CI check — automated workers may NEVER self-authorize
 # an unreleased dependency.
+# Fork exception: Éric approved the exact existing cstar/beads tuple below on
+# 2026-09-22 (po-tnutc.22.1 / PR #15). No other fork/version is authorized.
 #
 # Released: exactly vX.Y.Z where X, Y, Z are integers (e.g. v1.0.5, v0.0.1).
 # Blocked: pseudo-version, prerelease label, local path, git branch/ref, or
@@ -45,6 +47,15 @@ check_replace_rhs() {
 	if [[ "$rhs" =~ ^([^ ]+)[[:space:]]+([^ ]+)$ ]]; then
 		path_part="${BASH_REMATCH[1]}"
 		version="${BASH_REMATCH[2]}"
+	fi
+
+	# Explicit operator-approved exception. Match BOTH sides, including the
+	# absence of a source version, rather than whitelisting the target alone.
+	local lhs="${stripped%%=>*}"
+	if [[ "$path_part" == "github.com/cstar/beads" &&
+	      "$version" == "v1.0.6-0.20260917105420-f02fff7bb5e1" &&
+	      "$lhs" =~ ^[[:space:]]*(replace[[:space:]]+)?github\.com/steveyegge/beads[[:space:]]*$ ]]; then
+		return 0
 	fi
 
 	# Local filesystem paths are always unreleased.
@@ -117,4 +128,4 @@ if [[ $failed -ne 0 ]]; then
 	exit 1
 fi
 
-echo "check-gomod-replace: OK (no unreleased replace directives)"
+echo "check-gomod-replace: OK (released replacements or exact operator-approved fork)"
