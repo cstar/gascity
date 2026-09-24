@@ -227,6 +227,12 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 		wantLog   string
 	}{
 		{
+			name: "manual session waiting for operator",
+			configure: func(_ *testing.T, env *restartRequestTestEnv, session *beads.Bead, _ string) {
+				env.setSessionMetadata(session, map[string]string{"session_origin": "manual"})
+			},
+		},
+		{
 			name: "attached session",
 			configure: func(_ *testing.T, env *restartRequestTestEnv, _ *beads.Bead, sessionName string) {
 				env.sp.SetAttached(sessionName, true)
