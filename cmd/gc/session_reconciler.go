@@ -2813,7 +2813,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
 			}
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
-				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
+				// Operator-created sessions may wait detached without a claim.
+				// Idle time alone must not discard their conversation context.
+				exempt := infoByID[id].SessionOrigin == "manual" ||
+					pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
