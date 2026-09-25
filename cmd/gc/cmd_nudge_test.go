@@ -5803,6 +5803,7 @@ func TestDeliverSessionNudgeWaitIdleDeliversToIdleCodexAlias(t *testing.T) {
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
+	fake.WaitForIdleErrors["sess-worker"] = nil
 	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "codex-gpt"}, sessionName: "sess-worker"}
 	var stdout, stderr bytes.Buffer
 	if code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr); code != 0 {
