@@ -865,9 +865,9 @@ func TestSessionHandleNudgeWaitIdleReturnsUndeliveredForUnsupportedProvider(t *t
 		Profile:  ProfileCodexTmuxCLI,
 		Template: "probe",
 		Title:    "Probe",
-		Command:  "codex",
+		Command:  "gemini",
 		WorkDir:  t.TempDir(),
-		Provider: "codex",
+		Provider: "gemini",
 	})
 
 	if err := handle.Start(context.Background()); err != nil {
@@ -1856,7 +1856,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     sp,
 		SessionName:  "legacy-worker",
-		ProviderName: "codex",
+		ProviderName: "gemini",
 	})
 	if err != nil {
 		t.Fatalf("NewRuntimeHandle: %v", err)
@@ -2468,5 +2468,150 @@ func writeGeminiHistoryFixture(t *testing.T, path, sessionID string, messages []
 	body := fmt.Sprintf("{\n  \"sessionId\": %q,\n  \"messages\": [\n    %s\n  ]\n}\n", sessionID, strings.Join(messages, ",\n    "))
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write gemini transcript %s: %v", path, err)
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleCodexAliasWrapsReminder(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "codex-gpt",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	var waitCalls, nudgeNow int
+	var delivered string
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "WaitForIdle":
+			waitCalls++
+		case "NudgeNow":
+			nudgeNow++
+			delivered = call.Message
+		}
+	}
+	if waitCalls != 1 {
+		t.Fatalf("WaitForIdle calls = %d, want 1", waitCalls)
+	}
+	if nudgeNow != 1 {
+		t.Fatalf("NudgeNow calls = %d, want 1", nudgeNow)
+	}
+	if !strings.Contains(delivered, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system reminder", delivered)
+	}
+	if !strings.Contains(delivered, "[mail] check deploy status") {
+		t.Fatalf("delivered message = %q, want mail-tagged reminder", delivered)
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleCodexBusyDoesNotInjectWithoutError(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = context.DeadlineExceeded
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "codex-gpt",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle) err = %v, want nil for internal timeout", err)
+	}
+	if firstCall(sp.Calls, "WaitForIdle") == nil {
+		t.Fatal("Codex must wait for an idle boundary")
+	}
+	if result.Undelivered != NudgeUndeliveredNoIdleBoundary {
+		t.Fatalf("reason = %q, want no idle boundary", result.Undelivered)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false after internal timeout")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery after internal timeout", sp.Calls)
+		}
+	}
+}
+
+func TestSessionHandleNudgeWaitIdleCodexUsesWorkerBoundary(t *testing.T) {
+	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  t.TempDir(),
+		Provider: "codex",
+	})
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := mgr.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("manager.Get(%q): %v", handle.sessionID, err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil
+
+	startCalls := len(sp.Calls)
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle): %v", err)
+	}
+	if !result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = false, want true")
+	}
+
+	calls := sp.Calls[startCalls:]
+	methods := make([]string, 0, len(calls))
+	for _, call := range calls {
+		methods = append(methods, call.Method)
+	}
+	if !containsSubsequence(methods, []string{"IsRunning", "WaitForIdle", "NudgeNow"}) {
+		t.Fatalf("methods = %v, want IsRunning -> WaitForIdle -> NudgeNow", methods)
+	}
+	nudge := firstCall(calls, "NudgeNow")
+	if nudge == nil {
+		t.Fatalf("calls = %#v, want NudgeNow", calls)
+	}
+	if !strings.Contains(nudge.Message, "<system-reminder>") {
+		t.Fatalf("delivered message = %q, want system-reminder wrapper", nudge.Message)
+	}
+	if !strings.Contains(nudge.Message, "[mail] check deploy status") {
+		t.Fatalf("delivered message = %q, want source-tagged reminder content", nudge.Message)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // ErrOperationUnsupported reports that a worker handle cannot support the
@@ -414,7 +415,8 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	// property of the runtime rather than a transient miss. Reporting it as a
 	// bare Delivered:false is how `gc session nudge` came to print an
 	// unqualified success line for a delivery path that is a no-op end to end.
-	if h.providerName != "claude" {
+	family := sessionlog.ProviderFamily(h.providerName)
+	if family != "claude" && family != "codex" {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
 	waiter, ok := h.provider.(runtime.IdleWaitProvider)

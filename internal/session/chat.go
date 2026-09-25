@@ -864,7 +864,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 		return false, err
 	}
-	if providerKind(b) != "claude" {
+	if family := providerKind(b); family != "claude" && family != "codex" {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)
@@ -890,7 +890,7 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 		}
 		return true, nil
 	}
-	if providerKind(b) != "claude" {
+	if family := providerKind(b); family != "claude" && family != "codex" {
 		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.IdleWaitProvider)

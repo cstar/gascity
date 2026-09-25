@@ -462,13 +462,15 @@ func TestExpiredNudgeCleanupSurvivesNilFrontDoor(t *testing.T) {
 	}
 }
 
-func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForCodex(t *testing.T) {
+func TestDeliverSessionNudgeWithProviderWaitIdleQueuesForBusyCodex(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fake := runtime.NewFake()
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+
+	fake.WaitForIdleErrors["sess-worker"] = context.DeadlineExceeded
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1081,7 +1083,7 @@ func TestDeliverSessionNudgeWithWorkerManagedObserveErrorDoesNotResumeFromCaller
 	}
 }
 
-func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResume(t *testing.T) {
+func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesBusyCodexAfterResume(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	store := openNudgeBeadStore(dir)
@@ -1095,6 +1097,8 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
+
+	fake.WaitForIdleErrors[info.SessionName] = context.DeadlineExceeded
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -1148,6 +1152,8 @@ func TestDeliverSessionNudgeWithProviderWaitIdleStartsCodexPollerWhenQueued(t *t
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+
+	fake.WaitForIdleErrors["sess-worker"] = context.DeadlineExceeded
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -5788,4 +5794,38 @@ func TestResolveNudgePollInterval(t *testing.T) {
 			t.Fatalf("resolveNudgePollInterval = %v, want default %v", got, defaultNudgePollInterval)
 		}
 	})
+}
+
+func TestDeliverSessionNudgeWaitIdleDeliversToIdleCodexAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	fake.WaitForIdleErrors["sess-worker"] = nil
+	target := nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, resolved: &config.ResolvedProvider{Name: "codex-gpt"}, sessionName: "sess-worker"}
+	var stdout, stderr bytes.Buffer
+	if code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryWaitIdle, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Queued") {
+		t.Fatalf("idle Codex queued: %s", stdout.String())
+	}
+	delivered := 0
+	for _, call := range fake.Calls {
+		if call.Method == "NudgeNow" {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Fatalf("deliveries=%d, want 1", delivered)
+	}
+	pending, inflight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending)+len(inflight)+len(dead) != 0 {
+		t.Fatal("directly delivered nudge must not also be queued")
+	}
 }
