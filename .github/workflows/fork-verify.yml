@@ -64,6 +64,10 @@ jobs:
           go test ./cmd/gc/ -run 'TestWorkflowScopedWake|TestBdByIDConditional|TestModuleGraphOnlyApprovedReplacements|TestApprovedForkBeadsReplacementIsExact|TestDeliverSessionNudgeWaitIdleDeliversToIdleCodexAlias' -count=1
           go test ./examples/bd/dolt/ -run 'TestDoctorScriptHealthySweepsRecordedAdvisory|TestDoctorScriptSteadyHealthySkipsSweep|TestDoctorScriptAdvisorySweepPrecedesFreshSend' -count=1
           go test ./scripts/ -run '^TestCheckGomodReplaceGuard' -count=1
+      - name: Managed Dolt integration with paired bd (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 30
+        run: ./scripts/test-integration-shard packages-cmd-gc-integration
       - name: Full fast unit qualification (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
         timeout-minutes: 90
@@ -71,7 +75,3 @@ jobs:
           CGO_ENABLED: "0"
           GOMAXPROCS: "2"
         run: make test-fast-parallel LOCAL_TEST_JOBS=2 EXTRA_TEST_ENV='GOMAXPROCS=2 CGO_ENABLED=0 GC_TEST_INNER_P=2'
-      - name: Managed Dolt integration with paired bd (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        timeout-minutes: 30
-        run: ./scripts/test-integration-shard packages-cmd-gc-integration
