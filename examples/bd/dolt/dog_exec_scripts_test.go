@@ -6185,8 +6185,10 @@ func TestDoctorScriptHealthySweepsRecordedAdvisory(t *testing.T) {
 		t.Fatalf("seed advisory state: %v", err)
 	}
 
+	// Exercise healthy advisory state transitions, independently of host scheduling latency.
 	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
-		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath)
+		"GC_DOCTOR_ADVISORY_STATE_FILE="+statePath,
+		"GC_DOCTOR_LATENCY_WARN_MS=60000")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
 	}
@@ -6216,7 +6218,9 @@ func TestDoctorScriptSteadyHealthySkipsSweep(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeDogHealthyFakeDolt(t, binDir)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	// Exercise healthy advisory state transitions, independently of host scheduling latency.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir,
+		"GC_DOCTOR_LATENCY_WARN_MS=60000")
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
 	}
