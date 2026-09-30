@@ -5800,6 +5800,8 @@ func TestDeliverSessionNudgeWaitIdleDeliversToIdleCodexAlias(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fake := runtime.NewFake()
+	// Explicitly model an idle boundary; Fake defaults to unsupported.
+	fake.WaitForIdleErrors["sess-worker"] = nil
 	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
