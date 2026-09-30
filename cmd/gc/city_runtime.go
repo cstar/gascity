@@ -1625,7 +1625,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 
 	includeCold := cr.orderSweepColdLast.IsZero() || now.Sub(cr.orderSweepColdLast) >= orderTrackingColdSweepInterval
 	targets := orderTrackingWatchdogTargets(cr.cityPath, cr.cfg, loadSuspensionStateBestEffort(cr.cityPath), includeCold)
-	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStoresForTargets(targets)
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores(targets)
 	defer closeOpened()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
@@ -1803,11 +1803,11 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
-	return cr.orderTrackingSweepStoresForTargets(orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg))
-}
-
-func (cr *CityRuntime) orderTrackingSweepStoresForTargets(targets []orderTrackingSweepTarget) ([]beads.Store, []orderTrackingSweepTarget, func(), error) {
+func (cr *CityRuntime) orderTrackingSweepStores(targetSets ...[]orderTrackingSweepTarget) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // scope metadata retained for diagnostics
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	if len(targetSets) > 0 {
+		targets = targetSets[0]
+	}
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
