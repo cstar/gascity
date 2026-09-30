@@ -41,7 +41,7 @@ jobs:
           go mod download github.com/steveyegge/beads
           beads_dir="$(go list -m -f '{{.Dir}}' github.com/steveyegge/beads)"
           mkdir -p "$RUNNER_TEMP/paired-beads"
-          (cd "$beads_dir" && CGO_ENABLED=0 go build -p 2 -o "$RUNNER_TEMP/paired-beads/bd" ./cmd/bd)
+          (cd "$beads_dir" && CGO_ENABLED=1 go build -p 2 -o "$RUNNER_TEMP/paired-beads/bd" ./cmd/bd)
           echo "$RUNNER_TEMP/paired-beads" >> "$GITHUB_PATH"
       - name: Native dependency surface
         run: make check-native-dependency-surface
