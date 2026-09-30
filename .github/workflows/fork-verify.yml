@@ -33,8 +33,18 @@ jobs:
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
-          bd-version: ${{ env.BD_VERSION }}
+          bd-version: ""
           install-claude-cli: "false"
+      - name: Build bd from the same approved module as GC
+        shell: bash
+        run: |
+          go mod download github.com/steveyegge/beads
+          beads_dir="$(go list -m -f '{{.Dir}}' github.com/steveyegge/beads)"
+          mkdir -p "$RUNNER_TEMP/paired-beads"
+          (cd "$beads_dir" && CGO_ENABLED=0 go build -p 2 -o "$RUNNER_TEMP/paired-beads/bd" ./cmd/bd)
+          echo "$RUNNER_TEMP/paired-beads" >> "$GITHUB_PATH"
+      - name: Native dependency surface
+        run: make check-native-dependency-surface
       - name: Build (compiles the whole tree — catches compile errors the macOS ICU break hides)
         run: go build ./...
       - name: Vet changed package
@@ -61,3 +71,7 @@ jobs:
           CGO_ENABLED: "0"
           GOMAXPROCS: "2"
         run: make test-fast-parallel LOCAL_TEST_JOBS=2 EXTRA_TEST_ENV='GOMAXPROCS=2 CGO_ENABLED=0 GC_TEST_INNER_P=2'
+      - name: Managed Dolt integration with paired bd (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 30
+        run: ./scripts/test-integration-shard packages-cmd-gc-integration
