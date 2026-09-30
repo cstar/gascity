@@ -272,7 +272,9 @@ type bdByIDOp struct {
 	MaxDepth int
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
-	Update beads.UpdateOpts
+	Update           beads.UpdateOpts
+	ExpectedAssignee *string
+	ExpectedStatus   *string
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -370,6 +372,10 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			op.JSON = true
 		case "--claim":
 			claim = true
+		case "--if-assignee":
+			set(&op.ExpectedAssignee, value)
+		case "--if-status":
+			set(&op.ExpectedStatus, value)
 		case "--status", "-s":
 			set(&op.Update.Status, value)
 		case "--title":
@@ -409,7 +415,7 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 		// The claim is a compare-and-swap the store owns; bundling other field
 		// writes into it here would either apply them outside that swap or
 		// re-implement it. bd's own `--claim` is likewise its own operation.
-		if bdByIDUpdateWritesFields(op, metadata) {
+		if bdByIDUpdateWritesFields(op, metadata) || op.ExpectedAssignee != nil || op.ExpectedStatus != nil {
 			return bdByIDOp{}, "--claim", false
 		}
 		return bdByIDOp{Verb: bdByIDClaim, ID: op.ID, JSON: op.JSON}, "", true
@@ -434,6 +440,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
 	"--remove-label": true, "--set-metadata": true,
+	"--if-assignee": true, "--if-status": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -1717,7 +1724,23 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	if err := graph.Update(op.ID, op.Update); err != nil {
+	var writeErr error
+	if op.ExpectedAssignee != nil || op.ExpectedStatus != nil {
+		current, err := graph.Get(op.ID)
+		switch {
+		case err != nil:
+			writeErr = err
+		case (op.ExpectedAssignee != nil && current.Assignee != *op.ExpectedAssignee) || (op.ExpectedStatus != nil && current.Status != *op.ExpectedStatus):
+			writeErr = fmt.Errorf("update precondition failed: status or assignee changed")
+		default:
+			// The revision fences changes between this read and the write;
+			// never fall back to an unconditional update or retry a stale owner.
+			writeErr = graph.UpdateIfMatch(op.ID, current.Revision, op.Update)
+		}
+	} else {
+		writeErr = graph.Update(op.ID, op.Update)
+	}
+	if err := writeErr; err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
