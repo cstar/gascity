@@ -49,3 +49,15 @@ jobs:
         run: go test ./internal/orders/ -run 'TestParseScope|TestValidateRejectsUnknownScope|TestValidateAcceptsCityAndRigScope|TestParseEnv' -count=1 -v
       - name: Unit tests — scale from zero (#2819)
         run: go test ./cmd/gc/ -run 'TestBuildDesiredState_ScaleFromZero' -count=1 -v
+      - name: Unit tests — city stability and approved dependency guards
+        run: |
+          go test ./cmd/gc/ -run 'TestWorkflowScopedWake|TestBdByIDConditional|TestModuleGraphOnlyApprovedReplacements|TestApprovedForkBeadsReplacementIsExact|TestDeliverSessionNudgeWaitIdleDeliversToIdleCodexAlias' -count=1
+          go test ./examples/bd/dolt/ -run 'TestDoctorScriptHealthySweepsRecordedAdvisory|TestDoctorScriptSteadyHealthySkipsSweep|TestDoctorScriptAdvisorySweepPrecedesFreshSend' -count=1
+          go test ./scripts/ -run '^TestCheckGomodReplaceGuard' -count=1
+      - name: Full fast unit qualification (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 90
+        env:
+          CGO_ENABLED: "0"
+          GOMAXPROCS: "2"
+        run: make test-fast-parallel LOCAL_TEST_JOBS=2 EXTRA_TEST_ENV='GOMAXPROCS=2 CGO_ENABLED=0 GC_TEST_INNER_P=2'
