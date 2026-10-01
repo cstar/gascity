@@ -2290,6 +2290,18 @@ dolt.auto-start: false
 	}
 	defer func() { _ = ln.Close() }() //nolint:errcheck // test cleanup
 	port := ln.Addr().(*net.TCPAddr).Port
+	// Binding a non-loopback address does not guarantee that the first TCP
+	// connection is ready immediately (observed on macOS). Establish the
+	// fixture before testing projection; keep the production probe unchanged.
+	awaitCond(t, func() bool {
+		probe, err := net.DialTimeout("tcp", ln.Addr().String(), 250*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = probe.Close()
+		return true
+	}, "non-loopback fixture listener to become reachable")
+
 	if err := writeDoltState(cityDir, doltRuntimeState{
 		Running:   true,
 		PID:       os.Getpid(),
