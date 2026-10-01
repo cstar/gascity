@@ -1539,14 +1539,20 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 // s.DepList/s.List (each of which reacquire s.withReadRetry's lock): this
 // method runs INSIDE Ready's withReadRetry closure, so nesting another
 // withReadRetry call would risk a sync.RWMutex RLock reentrancy hazard.
-// GetDependenciesWithMetadata is a base beadslib.Storage method (no
-// capability probe needed, unlike DependencyBatchLister) and returns each
-// blocker's full Issue row — status and metadata together — alongside the
-// edge type in one call per candidate, so no second batched issue fetch is
-// needed the way BdStore's mirror image requires.
+// Prefer the guarded batch edge reader plus one deduplicated target fetch.
+// Only a backend explicitly reporting an unsupported reader uses the legacy
+// per-candidate path; a failed batch must never look like an empty graph.
 func (s *NativeDoltStore) filterReadyByWorkOutcome(ctx context.Context, storage beadslib.Storage, candidates []Bead) ([]Bead, error) {
 	if len(candidates) == 0 {
 		return candidates, nil
+	}
+	reader, err := storage.EdgeReader()
+	if err == nil {
+		return filterNativeReadyByWorkOutcomeBatch(ctx, storage, reader, candidates)
+	}
+	var unsupported *beadslib.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		return nil, fmt.Errorf("opening dependency batch reader: %w", err)
 	}
 	result := make([]Bead, 0, len(candidates))
 	for _, c := range candidates {
