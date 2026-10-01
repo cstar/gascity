@@ -2595,6 +2595,9 @@ func TestBdStoreReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked(t *t
 		if !strings.Contains(args, "--all") {
 			t.Fatalf("blocker lookup %q is not closed-inclusive: want --all", args)
 		}
+		if !strings.Contains(args, "--id=bd-blocker") || !strings.Contains(args, "--include-ephemeral") {
+			t.Fatalf("blocker lookup %q scans history: want exact IDs across both tiers", args)
+		}
 	}
 }
 
@@ -2612,6 +2615,46 @@ func TestBdStoreReadyKeepsDependentWhenBlockerClosedWithNoWorkOutcome(t *testing
 	}
 	if len(got) != 1 || got[0].ID != "bd-dependent" {
 		t.Fatalf("Ready() = %+v, want [bd-dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency", got)
+	}
+}
+
+// The blocker check must be bounded by dependency IDs, include both planes,
+// and propagate failures instead of admitting work on an incomplete result.
+func TestBdStoreReadyTargetedBlockers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rows      string
+		lookupErr error
+		wantReady int
+		wantErr   bool
+	}{
+		{"ephemeral blocked", `[{"id":"bd-blocker","status":"closed","ephemeral":true,"metadata":{"gc.work_outcome":"blocked"}}]`, nil, 0, false},
+		{"missing", `[]`, nil, 1, false},
+		{"unrelated blocked", `[{"id":"bd-unrelated","status":"closed","metadata":{"gc.work_outcome":"blocked"}}]`, nil, 1, false},
+		{"storage failure", "", errors.New("storage unavailable"), 0, true},
+		{"malformed", `[`, nil, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lookups := 0
+			runner := func(_, _ string, args ...string) ([]byte, error) {
+				if len(args) > 0 && args[0] == "ready" {
+					return []byte(`[{"id":"bd-dependent","status":"open","dependency_count":2,"dependencies":[{"issue_id":"bd-dependent","depends_on_id":"bd-blocker","type":"blocks"},{"issue_id":"bd-dependent","depends_on_id":"bd-other","type":"blocks"}]}]`), nil
+				}
+				lookups++
+				joined := strings.Join(args, " ")
+				if len(args) == 0 || args[0] != "list" || !strings.Contains(joined, "--id=bd-blocker,bd-other") || !strings.Contains(joined, "--include-ephemeral") || !strings.Contains(joined, "--all") {
+					t.Fatalf("unbounded or incomplete blocker lookup: %v", args)
+				}
+				return []byte(tc.rows), tc.lookupErr
+			}
+			got, err := beads.NewBdStore("/city", runner).Ready()
+			if (err != nil) != tc.wantErr || len(got) != tc.wantReady {
+				t.Fatalf("Ready() = %v, %v; want count %d, error %v", got, err, tc.wantReady, tc.wantErr)
+			}
+			if lookups != 1 {
+				t.Fatalf("blocker lookups = %d, want 1", lookups)
+			}
+		})
 	}
 }
 

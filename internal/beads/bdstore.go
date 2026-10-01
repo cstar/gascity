@@ -2784,13 +2784,14 @@ func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	return s.listViaBDList(query)
 }
 
-func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+func (s *BdStore) listViaBDList(query ListQuery, extraArgs ...string) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
 		limit = 0
 	}
 	args := []string{"list", "--json"}
+	args = append(args, extraArgs...)
 	if serverQuery.Label != "" {
 		args = append(args, "--label="+serverQuery.Label)
 	}
@@ -3306,7 +3307,13 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	// default query drops every closed row on both sides, and a closed
 	// blocker is the ONLY kind this veto can ever fire on, so without it the
 	// statusByID lookup below is empty and the whole check is dead code.
-	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"})
+	// bd list supports a grouped ID lookup across both storage planes. Going
+	// through List would fetch each entire closed tier before filtering IDs.
+	sort.Strings(blockerIDs)
+	blockers, err := s.listViaBDList(
+		ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"},
+		"--id="+strings.Join(blockerIDs, ","), "--include-ephemeral",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
 	}
