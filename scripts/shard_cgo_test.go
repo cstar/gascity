@@ -31,7 +31,7 @@ func TestShardScriptsApplyLinuxCGOFallback(t *testing.T) {
 
 			cmd := exec.Command(filepath.Join(repoRoot, "scripts", tt.script), tt.args...)
 			cmd.Dir = repoRoot
-			cmd.Env = fixture.env(t)
+			cmd.Env = append(fixture.env(t), "CGO_ENABLED=0", "GOMAXPROCS=2")
 
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -39,6 +39,9 @@ func TestShardScriptsApplyLinuxCGOFallback(t *testing.T) {
 			}
 
 			got := readCapturedGoEnv(t, fixture.capturePath)
+			if got["CGO_ENABLED"] != "0" || got["GOMAXPROCS"] != "2" {
+				t.Fatalf("build controls lost: CGO_ENABLED=%q GOMAXPROCS=%q", got["CGO_ENABLED"], got["GOMAXPROCS"])
+			}
 			if got["CGO_CPPFLAGS"] != "-I"+fixture.sysInclude {
 				t.Fatalf("CGO_CPPFLAGS=%q, want %q", got["CGO_CPPFLAGS"], "-I"+fixture.sysInclude)
 			}
@@ -170,6 +173,8 @@ case "$1" in
       fi
     done
     {
+      printf 'CGO_ENABLED=%s\n' "${CGO_ENABLED-}"
+      printf 'GOMAXPROCS=%s\n' "${GOMAXPROCS-}"
       printf 'CGO_CPPFLAGS=%s\n' "${CGO_CPPFLAGS-}"
       printf 'CGO_LDFLAGS=%s\n' "${CGO_LDFLAGS-}"
     } >> "$fake_go_capture"

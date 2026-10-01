@@ -104,6 +104,8 @@ run_in_test_env() {
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
     GC_FAST_UNIT="${GC_FAST_UNIT:-0}" \
+    CGO_ENABLED="${CGO_ENABLED-}" \
+    GOMAXPROCS="${GOMAXPROCS-}" \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
     GC_TEST_SHARD_INDEX="${shard_index}" \
