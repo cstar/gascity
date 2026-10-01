@@ -378,6 +378,12 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			set(&op.ExpectedStatus, value)
 		case "--status", "-s":
 			set(&op.Update.Status, value)
+		case "--defer":
+			deadline, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				return bdByIDOp{}, name, false
+			}
+			op.Update.DeferUntil = &deadline
 		case "--title":
 			set(&op.Update.Title, value)
 		case "--description", "-d":
@@ -427,6 +433,11 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 		// `gc bd update <id>` with nothing to write is bd's to answer.
 		return bdByIDOp{}, "", false
 	}
+	// The store contract uses open plus a deadline for timed deferral.
+	// A raw deferred status would never re-enter generic Ready after expiry.
+	if op.Update.DeferUntil != nil && op.Update.Status != nil && *op.Update.Status == "deferred" {
+		set(&op.Update.Status, "open")
+	}
 	return op, "", true
 }
 
@@ -440,7 +451,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
 	"--remove-label": true, "--set-metadata": true,
-	"--if-assignee": true, "--if-status": true,
+	"--if-assignee": true, "--if-status": true, "--defer": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -457,7 +468,7 @@ const bdByIDUpdateUnrepresentable = "--notes"
 // bdByIDUpdateWritesFields reports whether an update carries anything to write.
 func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 	u := op.Update
-	return u.Status != nil || u.Title != nil || u.Description != nil ||
+	return u.DeferUntil != nil || u.Status != nil || u.Title != nil || u.Description != nil ||
 		u.Assignee != nil || u.Type != nil || u.ParentID != nil ||
 		u.Priority != nil || len(u.Labels) > 0 || len(u.RemoveLabels) > 0 ||
 		len(metadata) > 0

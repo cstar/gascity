@@ -1458,6 +1458,9 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 	if opts.Assignee != nil {
 		args = append(args, "--assignee", *opts.Assignee)
 	}
+	if opts.DeferUntil != nil {
+		args = append(args, "--defer", opts.DeferUntil.UTC().Format(time.RFC3339Nano))
+	}
 	if len(opts.Metadata) > 0 {
 		keys := make([]string, 0, len(opts.Metadata))
 		for k := range opts.Metadata {
@@ -1893,6 +1896,9 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 	if opts.Assignee != nil {
 		args = append(args, "--assignee", *opts.Assignee)
 	}
+	if opts.DeferUntil != nil {
+		args = append(args, "--defer", opts.DeferUntil.UTC().Format(time.RFC3339Nano))
+	}
 	if len(opts.Metadata) > 0 {
 		keys := make([]string, 0, len(opts.Metadata))
 		for k := range opts.Metadata {
@@ -2229,6 +2235,9 @@ func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
 }
 
 func updateProjectionMatches(current Bead, opts UpdateOpts) bool {
+	if opts.DeferUntil != nil && (current.DeferUntil == nil || !current.DeferUntil.Equal(*opts.DeferUntil)) {
+		return false
+	}
 	if opts.Title != nil && current.Title != *opts.Title {
 		return false
 	}
@@ -2281,7 +2290,7 @@ func bdStoreStringSliceContains(values []string, want string) bool {
 
 func (item *bdStoreTxItem) preservedUpdateOpts(includeStatus bool) UpdateOpts {
 	current := item.current
-	opts := UpdateOpts{}
+	opts := UpdateOpts{DeferUntil: cloneTimePtr(current.DeferUntil)}
 	if current.Title != "" || item.touched.title {
 		opts.Title = &current.Title
 	}
@@ -2330,7 +2339,7 @@ func (t *bdStoreTxTouched) note(opts UpdateOpts) {
 }
 
 func hasUpdateOpts(opts UpdateOpts) bool {
-	return opts.Title != nil ||
+	return opts.DeferUntil != nil || opts.Title != nil ||
 		opts.Status != nil ||
 		opts.Type != nil ||
 		opts.Priority != nil ||

@@ -163,7 +163,7 @@ func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply 
 // ErrEmptyConditionalUpdate contract (a fenced no-op must not consume the
 // caller's revision).
 func updateOptsEmpty(opts UpdateOpts) bool {
-	return opts.Title == nil && opts.Status == nil && opts.Type == nil &&
+	return opts.DeferUntil == nil && opts.Title == nil && opts.Status == nil && opts.Type == nil &&
 		opts.Priority == nil && opts.Description == nil && opts.ParentID == nil &&
 		opts.Assignee == nil && len(opts.Metadata) == 0 &&
 		len(opts.Labels) == 0 && len(opts.RemoveLabels) == 0

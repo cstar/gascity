@@ -3252,6 +3252,12 @@ func nativeDoltMemUpdateOpts(updates map[string]interface{}) (UpdateOpts, error)
 		case "description":
 			text := fmt.Sprint(value)
 			opts.Description = &text
+		case "defer_until":
+			deadline, ok := value.(time.Time)
+			if !ok {
+				return UpdateOpts{}, fmt.Errorf("defer_until has type %T, want time.Time", value)
+			}
+			opts.DeferUntil = &deadline
 		case "assignee":
 			text := fmt.Sprint(value)
 			opts.Assignee = &text

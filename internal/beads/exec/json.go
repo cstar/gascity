@@ -33,6 +33,7 @@ type createRequest struct {
 // updateRequest is the JSON wire format sent on stdin for update operations.
 // Null/missing fields are not applied. Labels appends (does not replace).
 type updateRequest struct {
+	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 	Title        *string           `json:"title,omitempty"`
 	Status       *string           `json:"status,omitempty"`
 	Type         *string           `json:"type,omitempty"`
@@ -96,6 +97,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 // marshalUpdate converts update options to JSON for the exec script.
 func marshalUpdate(opts beads.UpdateOpts) ([]byte, error) {
 	r := updateRequest{
+		DeferUntil:   opts.DeferUntil,
 		Title:        opts.Title,
 		Status:       opts.Status,
 		Type:         opts.Type,

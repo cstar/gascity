@@ -727,6 +727,9 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 	if !ok {
 		return false
 	}
+	if opts.DeferUntil != nil && (b.DeferUntil == nil || !b.DeferUntil.Equal(*opts.DeferUntil)) {
+		return false
+	}
 	if opts.Title != nil && b.Title != *opts.Title {
 		return false
 	}
@@ -1190,6 +1193,9 @@ func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
 	}
 	if opts.Assignee != nil {
 		bead.Assignee = *opts.Assignee
+	}
+	if opts.DeferUntil != nil {
+		bead.DeferUntil = cloneTimePtr(opts.DeferUntil)
 	}
 	if len(opts.Metadata) > 0 {
 		if bead.Metadata == nil {

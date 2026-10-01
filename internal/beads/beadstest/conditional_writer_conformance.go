@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -76,6 +77,7 @@ func RunConditionalWriterConformanceWithOptions(t *testing.T, name string, open 
 	if opts.RestrictedUpdateFields {
 		conformanceRestrictedUpdateFieldsRejected(t, name, open)
 	}
+	conformanceDeferredDeadline(t, name, open)
 	conformanceReadsNeverBump(t, name, open)
 	conformanceRevisionTokensNeverReused(t, name, open)
 	conformanceReleaseIfCurrentMintsRevision(t, name, open)
@@ -846,5 +848,58 @@ func runEmptyUpdateContract(t *testing.T, open func(t *testing.T) beads.Store) {
 		if after.Revision != before.Revision {
 			t.Fatalf("revision %d -> %d on an invalid empty update, want unchanged", before.Revision, after.Revision)
 		}
+	})
+}
+
+// A deadline must be persisted in the same fenced write as ownership release.
+func conformanceDeferredDeadline(t *testing.T, name string, open func(t *testing.T) beads.Store) {
+	t.Run(name+"/deferred-deadline", func(t *testing.T) {
+		s := open(t)
+		b, err := s.Create(beads.Bead{Title: "capacity wait", Type: "task", Status: "in_progress", Assignee: "worker"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := conformanceWriterFor(t, s)
+		revision := conformanceRevOf(t, s, b.ID)
+		status, owner := "open", ""
+		future := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+		if err := w.UpdateIfMatch(b.ID, revision, beads.UpdateOpts{Status: &status, Assignee: &owner, DeferUntil: &future}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != "" || got.DeferUntil == nil || !got.DeferUntil.Equal(future) {
+			t.Fatalf("incomplete deferred write: %+v", got)
+		}
+		ready, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range ready {
+			if row.ID == b.ID {
+				t.Fatal("future deferred task is ready")
+			}
+		}
+		past := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		err = w.UpdateIfMatch(b.ID, revision, beads.UpdateOpts{DeferUntil: &past})
+		var stale *beads.PreconditionFailedError
+		if !errors.As(err, &stale) {
+			t.Fatalf("stale deadline write: %v", err)
+		}
+		if err := w.UpdateIfMatch(b.ID, got.Revision, beads.UpdateOpts{DeferUntil: &past}); err != nil {
+			t.Fatal(err)
+		}
+		ready, err = s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range ready {
+			if row.ID == b.ID {
+				return
+			}
+		}
+		t.Fatal("expired deferral did not become ready")
 	})
 }

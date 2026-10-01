@@ -212,10 +212,11 @@ type Bead struct {
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
-	Title        *string // set title (nil = no change)
-	Status       *string // set status (nil = no change)
-	Type         *string // set issue type (nil = no change)
-	Priority     *int    // set priority (nil = no change)
+	DeferUntil   *time.Time // set an absolute deferral deadline (nil = no change)
+	Title        *string    // set title (nil = no change)
+	Status       *string    // set status (nil = no change)
+	Type         *string    // set issue type (nil = no change)
+	Priority     *int       // set priority (nil = no change)
 	Description  *string
 	ParentID     *string
 	Assignee     *string  // set assignee (nil = no change)
@@ -369,7 +370,7 @@ func validateConditionalUpdateOpts(o UpdateOpts) error {
 
 // isEmptyUpdateOpts reports whether opts carries no mutation at all.
 func isEmptyUpdateOpts(o UpdateOpts) bool {
-	return o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
+	return o.DeferUntil == nil && o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
 		o.Description == nil && o.ParentID == nil && o.Assignee == nil &&
 		len(o.Labels) == 0 && len(o.RemoveLabels) == 0 && len(o.Metadata) == 0
 }

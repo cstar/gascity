@@ -249,6 +249,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	if opts.Assignee != nil {
 		m.beads[i].Assignee = *opts.Assignee
 	}
+	if opts.DeferUntil != nil {
+		m.beads[i].DeferUntil = cloneTimePtr(opts.DeferUntil)
+	}
 	if opts.Type != nil {
 		m.beads[i].Type = *opts.Type
 	}

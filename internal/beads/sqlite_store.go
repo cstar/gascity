@@ -1115,6 +1115,9 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 	if opts.Assignee != nil {
 		b.Assignee = *opts.Assignee
 	}
+	if opts.DeferUntil != nil {
+		b.DeferUntil = cloneTimePtr(opts.DeferUntil)
+	}
 	if len(opts.Metadata) > 0 {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, len(opts.Metadata))

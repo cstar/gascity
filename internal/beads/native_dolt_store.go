@@ -2022,6 +2022,9 @@ type nativeIssueGetter interface {
 
 func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssueGetter, id string, opts UpdateOpts) (map[string]interface{}, error) {
 	updates := make(map[string]interface{})
+	if opts.DeferUntil != nil {
+		updates["defer_until"] = *opts.DeferUntil
+	}
 	if opts.Title != nil {
 		updates["title"] = *opts.Title
 	}
