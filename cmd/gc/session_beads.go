@@ -2363,9 +2363,11 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			queueMeta(poolAliasConflictCountMetadataKey, strconv.Itoa(count+1))
 			queueMeta(poolAliasConflictAtMetadataKey, now.Format(time.RFC3339))
 		}
-		if needsAliasSync && isManagedPool && !isConfiguredNamed {
+		// Legacy manual singleton sessions share the same recorded conflict
+		// backoff as pool sessions; do not repeat their live reads either.
+		if needsAliasSync && !isConfiguredNamed {
 			selfOwner := ""
-			if isPoolInstance {
+			if isManagedPool && isPoolInstance {
 				selfOwner = managedAlias
 			}
 			if deferSingletonAliasRead(cfg, tp.TemplateName, managedAlias, selfOwner, b, openBeads, now) {

@@ -15,19 +15,26 @@ import (
 )
 
 func TestSyncSessionBeads_DeferredSingletonBackoffSkipsAliasReads(t *testing.T) {
+	for _, origin := range []string{"ephemeral", "manual"} {
+		t.Run(origin, func(t *testing.T) { testDeferredSingletonAliasBackoff(t, origin) })
+	}
+}
+
+func testDeferredSingletonAliasBackoff(t *testing.T, origin string) {
+	t.Helper()
 	base := beads.NewMemStore()
 	store := &sessionSnapshotListSpyStore{Store: base}
 	clk := &clock.Fake{Time: time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", Dir: "pack", MaxActiveSessions: intPtr(1)}}}
 	const template = "pack/worker"
 	owner, err := base.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
-		"template": template, "session_name": "owner", "agent_name": template, "alias": template, "state": "asleep", "session_origin": "ephemeral", poolManagedMetadataKey: "true",
+		"template": template, "session_name": "owner", "agent_name": template, "alias": template, "state": "asleep", "session_origin": origin, poolManagedMetadataKey: strconv.FormatBool(origin == "ephemeral"),
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	victim, err := base.Create(beads.Bead{Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
-		"template": template, "session_name": "deferred", "agent_name": "", "state": "asleep", "session_origin": "ephemeral", poolManagedMetadataKey: "true",
+		"template": template, "session_name": "deferred", "agent_name": "", "state": "asleep", "session_origin": origin, poolManagedMetadataKey: strconv.FormatBool(origin == "ephemeral"),
 		"continuation_epoch":         strconv.Itoa(session.DefaultContinuationEpoch),
 		poolAliasConflictMetadataKey: template, poolAliasConflictCountMetadataKey: "20", poolAliasConflictAtMetadataKey: clk.Now().Add(-time.Second).Format(time.RFC3339),
 	}})
@@ -35,6 +42,12 @@ func TestSyncSessionBeads_DeferredSingletonBackoffSkipsAliasReads(t *testing.T) 
 		t.Fatal(err)
 	}
 	desired := map[string]TemplateParams{"deferred": {TemplateName: template, Command: "new-command", WorkDir: "/new-workdir"}}
+	if origin == "manual" {
+		tp := desired["deferred"]
+		tp.ManualSession = true
+		tp.Alias = template
+		desired["deferred"] = tp
+	}
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
 	run := func() {
