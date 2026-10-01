@@ -366,8 +366,8 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 }
 
 // TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable
-// forces the cache path to fail (PrimeActive against a bd stub that errors on
-// `list`) and asserts the fallback makes exactly one bd invocation covering
+// forces the snapshot read to fail (a bd stub rejects the store Ready call)
+// and asserts the fallback makes exactly one bd invocation covering
 // the whole tick, not the shell script's N per-candidate/route calls.
 func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
@@ -384,7 +384,7 @@ func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnava
 set -eu
 printf '%%s\n' "$*" >> "%s"
 case "$1" in
-  list)
+  ready|list)
     exit 7
     ;;
 esac

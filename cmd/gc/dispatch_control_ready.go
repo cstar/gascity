@@ -417,11 +417,11 @@ var controlReadyCacheRegistry = struct {
 // controlReadyCacheEntry holds a primed snapshot per leg for one scope dir.
 // Its backing stores are closed when controlReadyCachesFor returns, once every
 // leg has primed, so an entry is a set of CLOSED-backing snapshots: it
-// may only be read through CachingStore.CachedReady, which answers entirely from
+// may only be read through CachedReady, which answers entirely from
 // the in-memory snapshot. Any read that would need to touch the backing must
 // decline to controlReadyFallbackReady instead of consulting a closed handle.
 type controlReadyCacheEntry struct {
-	caches   []*beads.CachingStore
+	caches   []controlReadySnapshot
 	primedAt time.Time
 }
 
@@ -464,7 +464,7 @@ type controlReadyCacheEntry struct {
 // and the registry loser's CachingStores are pure in-memory snapshots
 // (CachedReady never touches a backing), so an overwritten entry is never a
 // use-after-close.
-func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
+func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []controlReadySnapshot {
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
 	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
@@ -496,8 +496,21 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 			}
 		}
 	}()
-	caches := make([]*beads.CachingStore, 0, len(sources))
+	caches := make([]controlReadySnapshot, 0, len(sources))
 	for _, source := range sources {
+		if cli, ok := source.(*beads.BdStore); ok {
+			// Ready owns dependency/outcome semantics and has no server-side cap.
+			// Priming a general cache would issue several CLI reads just to
+			// reconstruct the same frontier, reopening Dolt for each one.
+			ready, err := cli.Ready(beads.ReadyQuery{TierMode: beads.TierIssues})
+			if err != nil {
+				log.Printf("control-ready cache: ready snapshot failed for %s: %v (falling back to a live bd query)", dir, err)
+				return nil
+			}
+			beads.SortBeadsReadyOrder(ready)
+			caches = append(caches, controlReadyRows(ready))
+			continue
+		}
 		cs := beads.NewCachingStore(source, nil)
 		if err := cs.PrimeActive(); err != nil {
 			log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
@@ -559,7 +572,7 @@ var controlReadyCacheSourcesFn = controlReadyCacheSources
 // answer from cache. A leg that is dirty or still priming sends the whole scan
 // to the fallback rather than to a short answer assembled from the legs that
 // happened to be warm.
-func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) {
+func cachedControlReadyUnion(caches []controlReadySnapshot) ([]beads.Bead, bool) {
 	if len(caches) == 0 {
 		return nil, false
 	}
