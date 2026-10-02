@@ -327,7 +327,9 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return withControlReadyServeReaders(workQuery, func() error {
+		return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	})
 }
 
 func requireWorkflowServeFollowSessionEnv() error {

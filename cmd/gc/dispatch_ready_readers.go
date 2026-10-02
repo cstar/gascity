@@ -16,7 +16,8 @@ type controlReadyReader struct {
 }
 
 // controlReadyReaders owns handles for a serve invocation, never query results.
-// The caller supplies the complete resolved opening-input fingerprint.
+// The caller supplies the resolved file/configuration fingerprint; the registry
+// also binds it to the exact environment used to open the handle.
 type controlReadyReaders struct {
 	mu      sync.Mutex
 	open    func(context.Context, string, map[string]string) (*controlReadyReader, bool, error)
@@ -40,10 +41,11 @@ func (r *controlReadyReaders) ready(ctx context.Context, root, fingerprint strin
 	if r.entries == nil {
 		r.entries = make(map[string]controlReadyReaderEntry)
 	}
+	fingerprint = controlReadyOpeningFingerprint(env, []byte(fingerprint), nil)
 	entry, exists := r.entries[root]
 	if exists && entry.fingerprint != fingerprint {
 		delete(r.entries, root)
-		if err := entry.reader.Close(); err != nil {
+		if err := closeControlReadyReader(entry.reader); err != nil {
 			return nil, true, err
 		}
 		exists = false
@@ -52,6 +54,9 @@ func (r *controlReadyReaders) ready(ctx context.Context, root, fingerprint strin
 		reader, eligible, err := r.open(ctx, root, env)
 		if err != nil || !eligible {
 			err = errors.Join(err, closeControlReadyReader(reader))
+			if err == nil {
+				r.entries[root] = controlReadyReaderEntry{fingerprint: fingerprint}
+			}
 			return nil, err != nil, err
 		}
 		if reader == nil || reader.Ready == nil || reader.Close == nil {
@@ -59,6 +64,9 @@ func (r *controlReadyReaders) ready(ctx context.Context, root, fingerprint strin
 		}
 		entry = controlReadyReaderEntry{fingerprint: fingerprint, reader: reader}
 		r.entries[root] = entry
+	}
+	if entry.reader == nil {
+		return nil, false, nil
 	}
 	rows, err := entry.reader.Ready(ctx, includeEphemeral)
 	if err != nil {
@@ -86,7 +94,7 @@ func (r *controlReadyReaders) close() error {
 	r.closed = true
 	var errs []error
 	for _, entry := range r.entries {
-		errs = append(errs, entry.reader.Close())
+		errs = append(errs, closeControlReadyReader(entry.reader))
 	}
 	r.entries = nil
 	return errors.Join(errs...)

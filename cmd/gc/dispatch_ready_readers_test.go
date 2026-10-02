@@ -35,7 +35,7 @@ func TestControlReadyReadersReuseHandleButReadLive(t *testing.T) {
 	if err != nil || !handled || len(first) != 1 {
 		t.Fatalf("first=%v handled=%v err=%v", first, handled, err)
 	}
-	second, _, err := readers.ready(t.Context(), "rig", "inputs1", nil, false)
+	second, _, err := readers.ready(t.Context(), "rig", "inputs1", map[string]string{"BEADS_DOLT_SERVER_PORT": "4567"}, false)
 	if err != nil || len(second) != 1 || first[0].ID == second[0].ID || opens != 1 || fixture.calls != 2 || fixture.include {
 		t.Fatalf("stale results or repeated opens: first=%v second=%v opens=%d calls=%d err=%v", first, second, opens, fixture.calls, err)
 	}
@@ -144,5 +144,41 @@ func TestControlReadyReadersRejectMissingCloseWithoutPanic(t *testing.T) {
 	rows, handled, err := readers.ready(t.Context(), "rig", "inputs", nil, false)
 	if err == nil || !handled || rows != nil {
 		t.Fatalf("broken opener accepted: rows=%v handled=%v err=%v", rows, handled, err)
+	}
+}
+
+func TestControlReadyReadersRememberIneligibilityUntilInputsChange(t *testing.T) {
+	opens := 0
+	readers := &controlReadyReaders{open: func(context.Context, string, map[string]string) (*controlReadyReader, bool, error) {
+		opens++
+		return nil, false, nil
+	}}
+	for _, fingerprint := range []string{"same", "same", "changed"} {
+		if _, handled, err := readers.ready(t.Context(), "rig", fingerprint, nil, false); handled || err != nil {
+			t.Fatalf("handled=%v err=%v", handled, err)
+		}
+	}
+	if opens != 2 {
+		t.Fatalf("ineligible opener repeated %d times", opens)
+	}
+	if err := readers.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControlReadyReadersBindEnvironmentEvenWhenCallerHashIsUnchanged(t *testing.T) {
+	opens := 0
+	readers := &controlReadyReaders{open: func(context.Context, string, map[string]string) (*controlReadyReader, bool, error) {
+		opens++
+		return (&readyReaderFixture{}).reader(), true, nil
+	}}
+	t.Cleanup(func() { _ = readers.close() })
+	for _, port := range []string{"1000", "2000"} {
+		if _, _, err := readers.ready(t.Context(), "rig", "same", map[string]string{"BEADS_DOLT_SERVER_PORT": port}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opens != 2 {
+		t.Fatal("opening environment detached from hash")
 	}
 }
