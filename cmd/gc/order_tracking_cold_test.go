@@ -1,12 +1,13 @@
 package main
 
 import (
-	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"io"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestOrderTrackingWatchdogColdScopes(t *testing.T) {

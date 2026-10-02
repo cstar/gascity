@@ -1,9 +1,10 @@
 package main
 
 import (
+	"time"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
-	"time"
 )
 
 // Suspended rigs still need eventual stale-tracking recovery, but not the
