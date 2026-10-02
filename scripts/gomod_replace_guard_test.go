@@ -63,10 +63,16 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 	})
 
 	const approved = "github.com/steveyegge/beads => github.com/cstar/beads v1.0.6-0.20260922201813-e5451e021529"
+	const readyReader = "github.com/steveyegge/beads => github.com/cstar/beads v1.0.6-0.20261002070153-e87fe79777c9"
 	for _, tc := range []struct {
 		name, body string
 		ok         bool
 	}{
+		{"approved ready reader", "replace " + readyReader, true},
+		{"approved ready reader block", "replace (\n\t" + readyReader + "\n)", true},
+		{"changed ready reader commit", "replace " + strings.ReplaceAll(readyReader, "e87fe79777c9", "e87fe79777c8"), false},
+		{"changed ready reader timestamp", "replace " + strings.ReplaceAll(readyReader, "20261002070153", "20261002070154"), false},
+		{"approved ready reader plus local", "replace " + readyReader + "\nreplace example.com/other => ../local", false},
 		{"approved fork", "replace " + approved, true},
 		{"approved fork block", "replace (\n\t" + approved + "\n)", true},
 		{"changed commit", "replace " + strings.ReplaceAll(approved, "e5451e021529", "e5451e021528"), false},

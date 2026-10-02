@@ -359,6 +359,8 @@ github.com/creack/pty v1.1.7/go.mod h1:lj5s0c3V2DBrqTV7llrYr5NG6My20zk30Fl46Y7Do
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/cstar/beads v1.0.6-0.20260922201813-e5451e021529 h1:BZHwACNOgZjNX1WNhUX0SLBPEffqKJI0KX6pd/YsvQw=
 github.com/cstar/beads v1.0.6-0.20260922201813-e5451e021529/go.mod h1:8Fr2DrR59+rY6N8TljPNweSXO/H7PH9YfNof8d5STGg=
+github.com/cstar/beads v1.0.6-0.20261002070153-e87fe79777c9 h1:cXoGrijucV/6RVgBLCE/lLzKeZWNXjKF8/JtA2ndogU=
+github.com/cstar/beads v1.0.6-0.20261002070153-e87fe79777c9/go.mod h1:8Fr2DrR59+rY6N8TljPNweSXO/H7PH9YfNof8d5STGg=
 github.com/danielgtaylor/huma/v2 v2.37.3 h1:6Av0Vj45Vk5lDxRVfoO2iPlEdvCvwLc7pl5nbqGOkYM=
 github.com/danielgtaylor/huma/v2 v2.37.3/go.mod h1:OeHHtCEAaNiuVbAVdYu4IQ0UOmnb4x3yMUOShNlZ53g=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
