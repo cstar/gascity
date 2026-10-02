@@ -956,6 +956,14 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			"PATH":           strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)),
 		})
 		runScript := func(args ...string) error {
+			// Match initAndHookDir: the bd bridge consumes canonical server-mode
+			// metadata. Calling the script on a bare managed .beads/dolt root
+			// makes modern bd correctly refuse an ambiguous legacy workspace.
+			if len(args) == 4 && args[0] == "init" {
+				if err := normalizeCanonicalBdScopeFilesForInit(cityPath, args[1], args[2], args[3]); err != nil {
+					return fmt.Errorf("normalize template scope: %w", err)
+				}
+			}
 			cmd := exec.Command(script, args...)
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()

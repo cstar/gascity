@@ -2363,6 +2363,18 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			queueMeta(poolAliasConflictCountMetadataKey, strconv.Itoa(count+1))
 			queueMeta(poolAliasConflictAtMetadataKey, now.Format(time.RFC3339))
 		}
+		// Legacy manual singleton sessions share the same recorded conflict
+		// backoff as pool sessions; do not repeat their live reads either.
+		if needsAliasSync && !isConfiguredNamed {
+			selfOwner := ""
+			if isManagedPool && isPoolInstance {
+				selfOwner = managedAlias
+			}
+			if deferSingletonAliasRead(cfg, tp.TemplateName, managedAlias, selfOwner, b, openBeads, now) {
+				applyBatch()
+				continue
+			}
+		}
 		// Stable managed pool aliases are intentionally revalidated every sync
 		// tick. Pool create holds the alias lock through persistence, but manual
 		// sessions and legacy/pre-stamped beads can still introduce conflicts

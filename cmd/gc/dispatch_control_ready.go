@@ -307,18 +307,43 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 // "this answer is short", so a leg that errors must not degrade to a partial
 // array that reads as "no work".
 func controlReadyFallbackReady(dir, cityPath string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	return controlReadyScopeAndGraphReady(dir, cityPath, env, includeEphemeral, true)
+}
+
+func controlReadyScopeAndGraphReady(dir, cityPath string, env map[string]string, includeEphemeral, tryServe bool) ([]beads.Bead, error) {
 	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
 		return controlReadyBindingReady(dir, binding, includeEphemeral)
 	}
-	scoped, err := controlReadyScopeShellReady(dir, env, includeEphemeral)
+	var scoped []beads.Bead
+	var err error
+	handled := false
+	if tryServe && controlReadyServeScopeRead != nil {
+		scoped, handled, err = controlReadyServeScopeRead(dir, cityPath, env, includeEphemeral)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !handled {
+		scoped, err = controlReadyScopeShellReady(dir, env, includeEphemeral)
+	}
 	if err != nil {
 		return nil, err
 	}
+	return controlReadyMergeGraphFrontier(scoped, dir, cityPath, includeEphemeral, false)
+}
+
+func controlReadyMergeGraphFrontier(scoped []beads.Bead, dir, cityPath string, includeEphemeral, native bool) ([]beads.Bead, error) {
 	binding, federated := controlGraphExtraLeg(cityPath, dir)
 	if !federated {
 		return scoped, nil
 	}
-	graphRows, err := controlReadyBindingReady(dir, binding, includeEphemeral)
+	var graphRows []beads.Bead
+	var err error
+	if native {
+		graphRows, err = controlReadyNativeGraphBindingReady(dir, binding, includeEphemeral)
+	} else {
+		graphRows, err = controlReadyBindingReady(dir, binding, includeEphemeral)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +411,20 @@ func controlReadyScopeShellReady(dir string, env map[string]string, includeEphem
 // selector, and the limit is taken after that exclusion so the batched cap means
 // the same thing on both arms.
 func controlReadyBindingReady(dir string, binding beads.Store, includeEphemeral bool) ([]beads.Bead, error) {
+	return controlReadyBindingFrontier(dir, binding, includeEphemeral, controlReadyFallbackLimit)
+}
+
+// Match the former non-ephemeral cache's unbounded graph frontier. The
+// legacy fallback and ephemeral paths retain their original aggregate cap.
+func controlReadyNativeGraphBindingReady(dir string, binding beads.Store, includeEphemeral bool) ([]beads.Bead, error) {
+	limit := 0
+	if includeEphemeral {
+		limit = controlReadyFallbackLimit
+	}
+	return controlReadyBindingFrontier(dir, binding, includeEphemeral, limit)
+}
+
+func controlReadyBindingFrontier(dir string, binding beads.Store, includeEphemeral bool, limit int) ([]beads.Bead, error) {
 	tier := beads.TierIssues
 	if includeEphemeral {
 		tier = beads.TierBoth
@@ -400,8 +439,8 @@ func controlReadyBindingReady(dir string, binding beads.Store, includeEphemeral 
 			continue
 		}
 		result = append(result, bead)
-		if len(result) == controlReadyFallbackLimit {
-			log.Printf("control-ready fallback: the graph binding for %s returned at least the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
+		if limit > 0 && len(result) == limit {
+			log.Printf("control-ready fallback: the graph binding for %s returned at least the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, limit)
 			break
 		}
 	}
@@ -417,11 +456,11 @@ var controlReadyCacheRegistry = struct {
 // controlReadyCacheEntry holds a primed snapshot per leg for one scope dir.
 // Its backing stores are closed when controlReadyCachesFor returns, once every
 // leg has primed, so an entry is a set of CLOSED-backing snapshots: it
-// may only be read through CachingStore.CachedReady, which answers entirely from
+// may only be read through CachedReady, which answers entirely from
 // the in-memory snapshot. Any read that would need to touch the backing must
 // decline to controlReadyFallbackReady instead of consulting a closed handle.
 type controlReadyCacheEntry struct {
-	caches   []*beads.CachingStore
+	caches   []controlReadySnapshot
 	primedAt time.Time
 }
 
@@ -464,7 +503,7 @@ type controlReadyCacheEntry struct {
 // and the registry loser's CachingStores are pure in-memory snapshots
 // (CachedReady never touches a backing), so an overwritten entry is never a
 // use-after-close.
-func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
+func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []controlReadySnapshot {
 	controlReadyCacheRegistry.mu.Lock()
 	entry, ok := controlReadyCacheRegistry.byDir[dir]
 	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
@@ -496,8 +535,21 @@ func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.Cach
 			}
 		}
 	}()
-	caches := make([]*beads.CachingStore, 0, len(sources))
+	caches := make([]controlReadySnapshot, 0, len(sources))
 	for _, source := range sources {
+		if cli, ok := source.(*beads.BdStore); ok {
+			// Ready owns dependency/outcome semantics and has no server-side cap.
+			// Priming a general cache would issue several CLI reads just to
+			// reconstruct the same frontier, reopening Dolt for each one.
+			ready, err := cli.Ready(beads.ReadyQuery{TierMode: beads.TierIssues})
+			if err != nil {
+				log.Printf("control-ready cache: ready snapshot failed for %s: %v (falling back to a live bd query)", dir, err)
+				return nil
+			}
+			beads.SortBeadsReadyOrder(ready)
+			caches = append(caches, controlReadyRows(ready))
+			continue
+		}
 		cs := beads.NewCachingStore(source, nil)
 		if err := cs.PrimeActive(); err != nil {
 			log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
@@ -559,7 +611,7 @@ var controlReadyCacheSourcesFn = controlReadyCacheSources
 // answer from cache. A leg that is dirty or still priming sends the whole scan
 // to the fallback rather than to a short answer assembled from the legs that
 // happened to be warm.
-func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) {
+func cachedControlReadyUnion(caches []controlReadySnapshot) ([]beads.Bead, bool) {
 	if len(caches) == 0 {
 		return nil, false
 	}
@@ -595,6 +647,23 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 
+	if controlReadyServeScopeRead != nil {
+		// Relocated graph scopes retain their existing cache and graph semantics.
+		if _, relocated := controlGraphBinding(cityPath, dir); !relocated {
+			ready, native, err := controlReadyServeScopeRead(dir, cityPath, env, parsed.includeEphemeral)
+			if err != nil {
+				return nil, true, err
+			}
+			if native {
+				ready, err = controlReadyMergeGraphFrontier(ready, dir, cityPath, parsed.includeEphemeral, true)
+				if err != nil {
+					return nil, true, err
+				}
+				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
+			}
+		}
+	}
+
 	if !parsed.includeEphemeral {
 		if caches := controlReadyCachesFor(dir, cityPath, cfg); len(caches) > 0 {
 			if ready, ok := cachedControlReadyUnion(caches); ok {
@@ -603,7 +672,13 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 		}
 	}
 
-	ready, err := controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
+	var ready []beads.Bead
+	if controlReadyServeScopeRead == nil {
+		ready, err = controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
+	} else {
+		// The live reader was already attempted above; do not open it twice.
+		ready, err = controlReadyScopeAndGraphReady(dir, cityPath, env, parsed.includeEphemeral, false)
+	}
 	if err != nil {
 		return nil, true, err
 	}

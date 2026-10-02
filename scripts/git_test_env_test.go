@@ -148,7 +148,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 	fanOutBody := content[bodyStart : bodyStart+endIdx]
 
 	logDir := t.TempDir()
-	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
+	probeCmd := `[ "${CGO_ENABLED:-}" = 0 ] && [ "${GOMAXPROCS:-}" = 2 ] || { echo BUILD_CONTROLS_MISSING; exit 1; }; if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
 
 	lines := []string{
 		"#!/usr/bin/env bash",
@@ -160,6 +160,7 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		"}",
 		`gate_fd=""`,
 		"local_jobs=1",
+		"export CGO_ENABLED=0 GOMAXPROCS=2",
 		"jobspecs=('probe::" + probeCmd + "')",
 		"export LOCAL_TEST_LOG_DIR=" + shellQuote(logDir),
 		`export TEST_LOCAL_NICE=""`,

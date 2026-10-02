@@ -328,7 +328,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	sessionBackendEnv, err := p.sessionBackendEnv(rigRoot)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
 	}
@@ -978,3 +978,11 @@ func prependStartupPromptToNudge(prompt, nudge string) string {
 }
 
 const startupPromptNudgeSeparator = "\n\n---\n\n"
+
+// sessionBackendEnv shares projection only when a build explicitly owns it.
+func (p *agentBuildParams) sessionBackendEnv(rigRoot string) (map[string]string, error) {
+	if p.backendProjection != nil {
+		return p.backendProjection.project(rigRoot)
+	}
+	return sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+}

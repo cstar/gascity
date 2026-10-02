@@ -10,7 +10,8 @@
 # bypass of this required CI check — automated workers may NEVER self-authorize
 # an unreleased dependency.
 # Fork exception: Éric approved the exact existing cstar/beads tuple below on
-# 2026-09-22 (po-tnutc.22.1 / PR #15). No other fork/version is authorized.
+# 2026-09-22 (po-tnutc.22.1 / PR #15), and the readiness SDK tuple on
+# 2026-10-02 (po-s0d9w). No other fork/version is authorized.
 #
 # Released: exactly vX.Y.Z where X, Y, Z are integers (e.g. v1.0.5, v0.0.1).
 # Blocked: pseudo-version, prerelease label, local path, git branch/ref, or
@@ -53,7 +54,8 @@ check_replace_rhs() {
 	# absence of a source version, rather than whitelisting the target alone.
 	local lhs="${stripped%%=>*}"
 	if [[ "$path_part" == "github.com/cstar/beads" &&
-	      "$version" == "v1.0.6-0.20260917105420-f02fff7bb5e1" &&
+	      ( "$version" == "v1.0.6-0.20260922201813-e5451e021529" ||
+	        "$version" == "v1.0.6-0.20261002070153-e87fe79777c9" ) &&
 	      "$lhs" =~ ^[[:space:]]*(replace[[:space:]]+)?github\.com/steveyegge/beads[[:space:]]*$ ]]; then
 		return 0
 	fi

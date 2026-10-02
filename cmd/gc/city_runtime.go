@@ -149,6 +149,7 @@ type CityRuntime struct {
 	detachedOrphanOnce sync.Once
 
 	orderSweepWatchdogLast             time.Time
+	orderSweepColdLast                 time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
@@ -1622,7 +1623,9 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	includeCold := cr.orderSweepColdLast.IsZero() || now.Sub(cr.orderSweepColdLast) >= orderTrackingColdSweepInterval
+	targets := orderTrackingWatchdogTargets(cr.cityPath, cr.cfg, loadSuspensionStateBestEffort(cr.cityPath), includeCold)
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores(targets)
 	defer closeOpened()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
@@ -1646,6 +1649,9 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
+	}
+	if includeCold && storeErr == nil && sweepErr == nil {
+		cr.orderSweepColdLast = now
 	}
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
@@ -1797,8 +1803,11 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
+func (cr *CityRuntime) orderTrackingSweepStores(targetSets ...[]orderTrackingSweepTarget) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // scope metadata retained for diagnostics
 	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	if len(targetSets) > 0 {
+		targets = targetSets[0]
+	}
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {

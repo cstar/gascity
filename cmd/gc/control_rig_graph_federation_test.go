@@ -709,18 +709,18 @@ func TestCachedControlReadyUnionRequiresEveryLeg(t *testing.T) {
 		t.Fatal("premise failed: an unprimed CachingStore answered CachedReady; this test cannot show a cold leg forces the fallback")
 	}
 
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, cold}); ok {
+	if got, ok := cachedControlReadyUnion([]controlReadySnapshot{warm, cold}); ok {
 		t.Errorf("cachedControlReadyUnion with one cold leg = (%d bead(s), true), want a miss; "+
 			"a partial union reads as a complete queue and the fallback never runs", len(got))
 	}
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{cold, warm}); ok {
+	if got, ok := cachedControlReadyUnion([]controlReadySnapshot{cold, warm}); ok {
 		t.Errorf("cachedControlReadyUnion with the cold leg FIRST = (%d bead(s), true), want a miss; "+
 			"leg order must not decide whether a short answer escapes", len(got))
 	}
 
 	// The control: every leg warm unions, so the miss above is the cold leg and
 	// not the union refusing to merge at all.
-	got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, other})
+	got, ok := cachedControlReadyUnion([]controlReadySnapshot{warm, other})
 	if !ok {
 		t.Fatal("cachedControlReadyUnion with every leg warm missed; the cached arm can never answer a federated scope and every tick pays the fallback")
 	}

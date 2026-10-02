@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -111,7 +112,7 @@ func TestControlReadyCachesForClosesOwnedSourcesPerPrime(t *testing.T) {
 	})
 
 	const primes = 3
-	var caches []*beads.CachingStore
+	var caches []controlReadySnapshot
 	for i := 0; i < primes; i++ {
 		caches = controlReadyCachesFor(dir, dir, nil)
 		if len(caches) != 1 {
@@ -295,5 +296,48 @@ func TestRunControlDispatcherInStoreClosesScopeStoreOnSuccess(t *testing.T) {
 	}
 	if got := fake.closes(); got != 1 {
 		t.Fatalf("scope store closed %d times, want 1: the dispatch success path must not leak the opened store", got)
+	}
+}
+
+// A ready-only consumer must not prime all statuses and dependency projections
+// through CLI subprocesses. Its snapshot must also keep candidates past 5000.
+func TestControlReadyBdSnapshotAvoidsGeneralPrimeAndKeepsWholeFrontier(t *testing.T) {
+	dir := t.TempDir()
+	rows := make([]beads.Bead, 5001)
+	for i := range rows {
+		rows[i] = beads.Bead{ID: fmt.Sprintf("ga-%05d", i), Status: "open", Type: "task", Assignee: "other"}
+	}
+	rows[5000].Assignee = "control-dispatcher"
+	payload, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	source := beads.NewBdStore(dir, func(_ string, _ string, args ...string) ([]byte, error) {
+		calls++
+		if len(args) == 0 || args[0] != "ready" {
+			return nil, fmt.Errorf("unexpected discovery command: %v", args)
+		}
+		if !strings.Contains(strings.Join(args, " "), "--limit 0") {
+			return nil, fmt.Errorf("ready frontier must be unbounded: %v", args)
+		}
+		return payload, nil
+	})
+	installControlReadyCacheSourcesFn(t, dir, func(_, _ string, _ *config.City) ([]beads.Store, []beads.Store, error) {
+		return []beads.Store{source}, nil, nil
+	})
+	for i := 0; i < 2; i++ {
+		caches := controlReadyCachesFor(dir, dir, nil)
+		ready, ok := cachedControlReadyUnion(caches)
+		if !ok {
+			t.Fatal("ready snapshot unavailable")
+		}
+		got := filterReadyByAssignee(ready, "control-dispatcher", workflowServeScanLimit)
+		if len(got) != 1 || got[0].ID != rows[5000].ID {
+			t.Fatalf("candidate beyond 5000 lost: %v", got)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("commands=%d, want one read reused within TTL", calls)
 	}
 }

@@ -11,7 +11,11 @@ set -euo pipefail
 # pulled through by the google.golang.org/api bump MVS forced alongside it. None
 # of the OpenAPI stack links into gc -- only bd's internal/httpapi/apigen imports
 # it, which the root beads package never reaches.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-737}"
+# Operator-approved schema-67 fork e5451e021529: measured 737 -> 741.
+# Adds mohae/deepcopy, perimeterx/marshmallow, speakeasy-api/openapi-overlay,
+# woodsbury/decimal128 and natefinch/lumberjack.v2; removes speakeasy-api/openapi.
+# Keep the binary and provider-specific module ceilings unchanged.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-741}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made

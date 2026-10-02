@@ -202,8 +202,9 @@ func TestStorageSurfaceCompilesIdenticallyWithAndWithoutCGO(t *testing.T) {
 }
 
 // TestModuleGraphOnlyApprovedReplacements keeps the upstream no-redirection
-// guarantee except for the exact existing Beads fork approved by Éric on
-// 2026-09-22 (po-tnutc.22.1 / PR #15). Malformed directives still fail closed.
+// guarantee except for the exact Beads fork tuples approved by Éric for
+// schema 67 activation and the read-only readiness SDK. Malformed directives
+// still fail closed.
 func TestModuleGraphOnlyApprovedReplacements(t *testing.T) {
 	root := moduleRoot(t)
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
@@ -228,32 +229,40 @@ func TestModuleGraphOnlyApprovedReplacements(t *testing.T) {
 
 func approvedForkBeadsReplacement(d replaceDirective) bool {
 	return d.oldPath == "github.com/steveyegge/beads" && d.oldVersion == "" &&
-		d.newPath == "github.com/cstar/beads" && d.newVersion == "v1.0.6-0.20260917105420-f02fff7bb5e1"
+		d.newPath == "github.com/cstar/beads" &&
+		(d.newVersion == "v1.0.6-0.20260922201813-e5451e021529" ||
+			d.newVersion == "v1.0.6-0.20261002070153-e87fe79777c9")
 }
 
 func TestApprovedForkBeadsReplacementIsExact(t *testing.T) {
-	approved := replaceDirective{oldPath: "github.com/steveyegge/beads", newPath: "github.com/cstar/beads", newVersion: "v1.0.6-0.20260917105420-f02fff7bb5e1"}
-	if !approvedForkBeadsReplacement(approved) {
-		t.Fatal("approved tuple rejected")
-	}
-	for _, field := range []string{"source", "source version", "target", "target version", "local target"} {
-		t.Run(field, func(t *testing.T) {
-			altered := approved
-			switch field {
-			case "source":
-				altered.oldPath = "example.com/other"
-			case "source version":
-				altered.oldVersion = "v1.3.0-rc.2"
-			case "target":
-				altered.newPath = "github.com/other/beads"
-			case "target version":
-				altered.newVersion = "v1.0.6"
-			case "local target":
-				altered.newPath = "../beads"
-				altered.newVersion = ""
+	for _, version := range []string{"v1.0.6-0.20260922201813-e5451e021529", "v1.0.6-0.20261002070153-e87fe79777c9"} {
+		t.Run(version, func(t *testing.T) {
+			approved := replaceDirective{oldPath: "github.com/steveyegge/beads", newPath: "github.com/cstar/beads", newVersion: version}
+			if !approvedForkBeadsReplacement(approved) {
+				t.Fatal("approved tuple rejected")
 			}
-			if approvedForkBeadsReplacement(altered) {
-				t.Fatalf("unauthorized replacement accepted: %+v", altered)
+			for _, field := range []string{"source", "source version", "target", "target version", "previous version", "local target"} {
+				t.Run(field, func(t *testing.T) {
+					altered := approved
+					switch field {
+					case "source":
+						altered.oldPath = "example.com/other"
+					case "source version":
+						altered.oldVersion = "v1.3.0-rc.2"
+					case "target":
+						altered.newPath = "github.com/other/beads"
+					case "target version":
+						altered.newVersion = "v1.0.6"
+					case "previous version":
+						altered.newVersion = "v1.0.6-0.20260917105420-f02fff7bb5e1"
+					case "local target":
+						altered.newPath = "../beads"
+						altered.newVersion = ""
+					}
+					if approvedForkBeadsReplacement(altered) {
+						t.Fatalf("unauthorized replacement accepted: %+v", altered)
+					}
+				})
 			}
 		})
 	}

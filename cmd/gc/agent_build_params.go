@@ -20,6 +20,8 @@ import (
 // agentBuildParams holds shared, per-city parameters for building agents.
 // These are constant across all agents in a single buildDesiredState call.
 type agentBuildParams struct {
+	backendProjection *sessionBackendProjection
+
 	city            *config.City
 	cityName        string
 	cityPath        string
@@ -172,6 +174,9 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
 	}
+	params.backendProjection = &sessionBackendProjection{resolve: func(rigRoot string) (map[string]string, error) {
+		return sessionBackendEnvWithError(cityPath, rigRoot, cfg.Rigs)
+	}}
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}

@@ -2614,3 +2614,28 @@ func TestDoorUpdateAfterFoundSurfacesStoreErrorVerbatim(t *testing.T) {
 		})
 	}
 }
+
+func TestBdByIDConditionalUpdatePreservesOtherOwner(t *testing.T) {
+	cityPath, store := foreignProviderCity(t)
+	bead := mustCreateClassBead(t, store, beads.Bead{Title: "conditional wait", Type: "task", Status: "in_progress", Assignee: "worker"})
+	for _, owner := range []string{"other", "worker"} {
+		var out, errout bytes.Buffer
+		code, handled := maybeRouteBdByID(cityPath, "", []string{"update", bead.ID, "--if-assignee", owner, "--if-status", "in_progress", "--assignee", "", "--status", "blocked", "--set-metadata", "wait=operator", "--json"}, &out, &errout)
+		if !handled {
+			t.Fatal("class update fell through")
+		}
+		if (code == 0) != (owner == "worker") {
+			t.Fatalf("owner %s code %d: %s", owner, code, errout.String())
+		}
+		got, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if owner == "other" && got.Assignee != "worker" {
+			t.Fatal("changed another owner")
+		}
+		if owner == "worker" && (got.Status != "blocked" || got.Assignee != "" || got.Metadata["wait"] != "operator") {
+			t.Fatalf("incomplete update: %+v", got)
+		}
+	}
+}

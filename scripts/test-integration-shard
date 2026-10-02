@@ -68,6 +68,8 @@ run_go() {
     GOWORK="${GOWORK-}" \
     GC_BEADS="${GC_BEADS-}" \
     GC_FAST_UNIT=0 \
+    CGO_ENABLED="${CGO_ENABLED-}" \
+    GOMAXPROCS="${GOMAXPROCS-}" \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
     go "$@"

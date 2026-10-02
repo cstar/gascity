@@ -1182,7 +1182,30 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
 	if target.sessionName != "" {
-		obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+		// Pollers already carry the exact session identity. Resolving the
+		// runtime name again would query session metadata on every observation.
+		// Keep the live-generation check below: a name can be reused meanwhile.
+		var handle worker.Handle
+		if store != nil && target.sessionID != "" {
+			if info, pr, err := session.ResolveSessionRecordByExactID(store, target.sessionID); err == nil {
+				factory, err := workerFactoryWithConfig(target.cityPath, store, sp, target.cfg)
+				if err != nil {
+					return worker.LiveObservation{}, err
+				}
+				handle, err = factory.SessionByRecord(info, pr)
+				if err != nil {
+					return worker.LiveObservation{}, err
+				}
+			}
+		}
+		if handle == nil {
+			var err error
+			handle, err = workerHandleForSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+			if err != nil {
+				return worker.LiveObservation{}, err
+			}
+		}
+		obs, err := worker.ObserveHandle(context.Background(), handle)
 		if err != nil {
 			return worker.LiveObservation{}, err
 		}

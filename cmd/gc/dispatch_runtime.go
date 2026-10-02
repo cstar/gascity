@@ -327,7 +327,9 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
 		return err
 	}
-	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	return withControlReadyServeReaders(workQuery, func() error {
+		return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+	})
 }
 
 func requireWorkflowServeFollowSessionEnv() error {
@@ -530,7 +532,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	defer close(done)
 
 	eventCh := make(chan workflowWatchResult, 1)
-	go pumpWorkflowEvents(done, watcher, eventCh)
+	go pumpWorkflowEvents(done, watcher, eventCh, workflowScopedEventFilter(agentCfg.QualifiedName()))
 
 	idleSweeps := 0
 	var pendingWakeErr error
@@ -599,9 +601,17 @@ type workflowWatchResult struct {
 	err error
 }
 
-func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult) {
+func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult, filters ...func(events.Event) bool) {
 	for {
 		evt, err := watcher.Next()
+		if err == nil && len(filters) > 0 && !filters[0](evt) {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			continue
+		}
 		select {
 		case eventCh <- workflowWatchResult{evt: evt, err: err}:
 		case <-done:
