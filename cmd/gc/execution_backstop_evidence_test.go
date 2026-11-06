@@ -20,10 +20,13 @@ import (
 // drained while it was working. Execution evidence must veto that drain and
 // leave the nudges alone; a seat without evidence must still be drained.
 
+// evidenceIncarnationToken is the fixture session's instance_token.
+const evidenceIncarnationToken = "incarnation-1"
+
 // stampLifecycleIdentity gives the fixture's claim the hook's lifecycle
 // stamps (graph step, holding session) and the session row a wake time and
 // incarnation, so it is a step_started candidate.
-func (f *executionBackstopFixture) stampLifecycleIdentity(t *testing.T, token string, wokeAt time.Time) {
+func (f *executionBackstopFixture) stampLifecycleIdentity(t *testing.T, wokeAt time.Time) {
 	t.Helper()
 	if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
 		beadmeta.StepIDMetadataKey:      "evo-feature.implement",
@@ -33,7 +36,7 @@ func (f *executionBackstopFixture) stampLifecycleIdentity(t *testing.T, token st
 		t.Fatalf("stamping the claim's lifecycle identity: %v", err)
 	}
 	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
-		"instance_token": token,
+		"instance_token": evidenceIncarnationToken,
 		"last_woke_at":   wokeAt.UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("stamping the session incarnation: %v", err)
@@ -81,7 +84,7 @@ func (f *executionBackstopFixture) deliveredNudges() []string {
 func TestExecutionEvidenceNeverDrainsAStartedSeatRunningASilentSuite(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	woke := f.now.Add(-2 * time.Minute)
-	f.stampLifecycleIdentity(t, "incarnation-1", woke)
+	f.stampLifecycleIdentity(t, woke)
 	f.recordStepStarted(f.session.ID, woke.Add(90*time.Second))
 
 	f.runSilentTurn(t, f.now, 45*time.Minute)
@@ -118,7 +121,7 @@ func TestExecutionEvidenceNeverDrainsAStartedSeatRunningASilentSuite(t *testing.
 func TestExecutionEvidenceStampsWhileBusyAndOutlivesTheEventTail(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
 	woke := f.now.Add(-time.Minute)
-	f.stampLifecycleIdentity(t, "incarnation-1", woke)
+	f.stampLifecycleIdentity(t, woke)
 	f.recordStepStarted(f.session.ID, woke.Add(10*time.Second))
 
 	f.sp.SetActivity(f.sessName, f.now) // busy
@@ -173,7 +176,7 @@ func TestExecutionEvidenceNegativeControlsStillDrain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			woke := f.now.Add(-2 * time.Minute)
-			f.stampLifecycleIdentity(t, "incarnation-1", woke)
+			f.stampLifecycleIdentity(t, woke)
 			tc.setup(t, f, woke)
 
 			// Inside executionStalledLatchRetryAfter, so the one escalation
@@ -202,7 +205,7 @@ func TestExecutionEvidenceUnknownActivityStillHolds(t *testing.T) {
 	for _, started := range []bool{false, true} {
 		f := newExecutionBackstopFixture(t)
 		woke := f.now.Add(-2 * time.Minute)
-		f.stampLifecycleIdentity(t, "incarnation-1", woke)
+		f.stampLifecycleIdentity(t, woke)
 		if started {
 			f.recordStepStarted(f.session.ID, woke.Add(time.Minute))
 		}
