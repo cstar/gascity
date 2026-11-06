@@ -32,6 +32,26 @@ package main
 // reports none) holds too. That is the #312 lesson stated in the one place it
 // applies: never nudge on "we cannot tell".
 //
+// # Execution evidence vetoes the escalation, never the nudge
+//
+// The activity clock is pane output, so a seat that started its step and is
+// running a long silent command (a full test suite, a build) reads exactly
+// like one that never started. The predicate therefore persists execution
+// evidence on the row (executionClaimStartedKey): an execution.step_started
+// of the claimed bead, recorded by `gc hook --claim` from this session at or
+// after the row's last_woke_at. A seat with that evidence still gets its
+// bounded nudges once quiet past the window (the held-claim text, which
+// carries no --drain-ack, when its template configures none or one that
+// does), but when they are spent it is held as executing rather than
+// drained. A seat with no evidence (never started, another session's event,
+// an event from before this incarnation's wake) is unchanged.
+//
+// The marker also carries the incarnation's instance_token, so a later
+// incarnation holding the same claim starts its own grace window and attempt
+// count instead of inheriting an expired one.
+//
+// (Backport to v1.5.1 of #7911, #7922, #7984 and the latch clear of #8592.)
+//
 // # Exhaustion hands the session to a lane that already converges
 //
 // At the attempt cap the stall becomes a typed event and the session is handed
@@ -77,6 +97,17 @@ const (
 	executionClaimNudgeStoreRefKey = "execution_claim_nudge_store_ref"
 	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
 	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
+	// executionClaimNudgeTokenKey records the instance_token of the
+	// incarnation the marker observed: a later incarnation holding the same
+	// claim starts its own grace window and attempt count.
+	executionClaimNudgeTokenKey = "execution_claim_nudge_token"
+	// executionClaimStartedKey persists execution evidence as
+	// "<instance_token>|<bead id>" once the backstop has seen an
+	// execution.step_started of that claimed bead from this session since its
+	// last wake. A value for another token or bead is no evidence. The claim
+	// marker's clear leaves it: a stamped claim can drop out of the
+	// in_progress snapshot for a pass and come back.
+	executionClaimStartedKey = "execution_claim_started"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
 	// typed event and the drain request fire once per stalled claim rather than
 	// once per tick for as long as the claim is held.
@@ -98,7 +129,20 @@ const (
 const (
 	executionHoldMultiClaim = "multi_claim"
 	executionHoldNotQuiet   = "not_quiet"
+	// executionHoldExecuting names execution evidence vetoing the
+	// escalation: the claimed bead's step started this incarnation, so once
+	// its nudges are spent, or it has none to send, the seat is held rather
+	// than drained.
+	executionHoldExecuting = "executing"
 )
+
+// executionClaimNudgeLabel names the execution backstop in its log lines.
+const executionClaimNudgeLabel = "execution-claim-nudge"
+
+// defaultHeldClaimNudge is the claim nudge for a seat whose claim (the %s)
+// has started its step. It carries no --drain-ack: a started seat must never
+// be told to acknowledge a drain.
+const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
 
 // executionStalledLatchRetryAfter bounds how long a latch silences
 // re-escalation of the SAME incarnation. The drain it requested normally
@@ -156,6 +200,22 @@ type executionClaim struct {
 	StoreRef string
 	Assignee string
 	Store    beads.Store
+	// The claimed bead's lifecycle identity, as the hook stamps it: its
+	// graph step, the session that holds it, and its kind.
+	StepID, SessionID, SessionName, Kind string
+}
+
+// executionLifecycleCandidate reports whether claim can carry a step_started
+// from session s: the hook's own gate (hookClaimLifecycleCandidate), read off
+// the snapshot's metadata. Only such a claim reads the event tail, so a claim
+// that can never carry the event does not re-read it every pass.
+func executionLifecycleCandidate(claim executionClaim, s beads.Bead) bool {
+	if claim.RootID == "" || claim.StepID == "" || beadmeta.IsControlKind(claim.Kind) ||
+		claim.SessionID == "" || claim.SessionID != strings.TrimSpace(s.ID) {
+		return false
+	}
+	name := strings.TrimSpace(s.Metadata["session_name"])
+	return name == "" || claim.SessionName == name
 }
 
 // executionClaimSnapshot indexes in-progress claims by their exact assignee
@@ -177,9 +237,13 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			continue
 		}
 		claim := executionClaim{
-			BeadID:   wb.ID,
-			RootID:   strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
-			Assignee: assignee,
+			BeadID:      wb.ID,
+			RootID:      strings.TrimSpace(wb.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			Assignee:    assignee,
+			StepID:      strings.TrimSpace(wb.Metadata[beadmeta.StepIDMetadataKey]),
+			SessionID:   strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]),
+			SessionName: strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]),
+			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
 		}
 		if i < len(storeRefs) {
 			claim.StoreRef = normalizeIdleClaimStoreRef(storeRefs[i])
@@ -257,18 +321,123 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		p.observeHold(p.store, &s, executionHoldMultiClaim, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
+	claim := claims[0]
+	// Persist execution evidence, busy or quiet: until this incarnation's
+	// claim is stamped, each pass looks for it, and the first sighting stamps
+	// the row, so the evidence outlives the event log's bounded tail.
+	started := p.markedStarted(s, claim.BeadID)
+	if !started && executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID) {
+		started = p.markStarted(&s, claim.BeadID)
+	}
 	if !p.sessionIsQuiet(sessName) {
 		p.observeHold(p.store, &s, executionHoldNotQuiet, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
-	claim := claims[0]
-	return backstopTarget{
+	target := backstopTarget{
 		ID:       claim.BeadID,
 		RootID:   claim.RootID,
 		StoreRef: claim.StoreRef,
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
-	}, backstopResolutionOutstanding
+	}
+	// Execution evidence vetoes the escalation, never the nudge: a seat that
+	// started its step is not drained, but a seat whose turn ended while it
+	// still holds the claim is nudged like any other.
+	if same, attempts, last := p.state(s, target); same && started && p.escalatesNext(s, attempts, last) {
+		p.holdExecuting(&s, sessName, claim.BeadID, attempts)
+		return backstopTarget{}, backstopResolutionHold
+	}
+	return target, backstopResolutionOutstanding
+}
+
+// holdExecuting records the executing hold on s and logs it once as it is
+// entered: the breadcrumb is written only when the reason changes.
+func (p poolExecutionBackstop) holdExecuting(s *beads.Bead, sessName, beadID string, attempts int) {
+	entering := !holdIs(*s, executionHoldExecuting)
+	p.observeHold(p.store, s, executionHoldExecuting, p.stdout)
+	if entering && holdIs(*s, executionHoldExecuting) {
+		fmt.Fprintf(p.stdout, //nolint:errcheck // best-effort
+			"execution-claim-nudge: %s holds started %s after %d/%d nudge attempts; holding as executing (no drain)\n",
+			sessName, beadID, attempts, idleClaimNudgeMaxAttempts)
+	}
+}
+
+// holdIs reports whether s's hold breadcrumb names reason.
+func holdIs(s beads.Bead, reason string) bool {
+	cur := strings.TrimSpace(s.Metadata[executionClaimHoldKey])
+	return cur == reason || strings.HasPrefix(cur, reason+" ")
+}
+
+// escalatesNext reports whether the engine's next action on s, given its
+// pacing, is the terminal escalation (exhausted): the attempts are spent, or a
+// nudge is due with no content to deliver, which the engine escalates at once.
+// The second mirrors runNudgeBackstop's empty-content shortcut; change the two
+// in lockstep.
+func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
+	switch decideBackstopAction(attempts, last, p.now) {
+	case backstopActionExhausted:
+		return true
+	case backstopActionNudge:
+		return p.content(s) == ""
+	default:
+		return false
+	}
+}
+
+// executionEvidenceTailBytes bounds how far back the execution-evidence read
+// walks the event log from its end: the evidence it looks for is from the
+// seat's current incarnation, and it is persisted once seen.
+const executionEvidenceTailBytes = 8 << 20
+
+// executionEvidenceTailEvents caps the matching events that read returns.
+const executionEvidenceTailEvents = 20
+
+// executedSinceWake reports execution evidence for the claim: an
+// execution.step_started of beadID, from this session, at or after the row's
+// last_woke_at. It answers only from a recorder that can be read, and with a
+// wake time to read from; otherwise it reports no evidence and the activity
+// clock decides, as before.
+func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bool {
+	tail, ok := p.rec.(events.TailProvider)
+	if !ok || strings.TrimSpace(beadID) == "" {
+		return false
+	}
+	woke := parseRFC3339OrZero(s.Metadata["last_woke_at"])
+	if woke.IsZero() {
+		return false
+	}
+	evts, err := tail.ListTail(events.Filter{
+		Type: events.ExecutionStepStarted, Subject: beadID, Since: woke, MaxScanBytes: executionEvidenceTailBytes,
+	}, executionEvidenceTailEvents)
+	if err != nil {
+		return false
+	}
+	for _, e := range evts {
+		if e.SessionID == s.ID || e.Actor == s.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// startedValue is executionClaimStartedKey's value for s's incarnation and
+// beadID.
+func startedValue(s beads.Bead, beadID string) string {
+	return strings.TrimSpace(s.Metadata["instance_token"]) + "|" + strings.TrimSpace(beadID)
+}
+
+// markedStarted reports the row's persisted execution evidence for its
+// current incarnation and beadID.
+func (p poolExecutionBackstop) markedStarted(s beads.Bead, beadID string) bool {
+	return strings.TrimSpace(beadID) != "" && strings.TrimSpace(s.Metadata[executionClaimStartedKey]) == startedValue(s, beadID)
+}
+
+// markStarted stamps the row's execution evidence for its incarnation and
+// beadID, and reports that the evidence holds (it does even when the write
+// fails: the sighting is this pass's evidence, and the next pass reads again).
+func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
+	writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout)
+	return true
 }
 
 // sessionIsQuiet reports whether the runtime has observed no activity for at
@@ -285,12 +454,34 @@ func (p poolExecutionBackstop) sessionIsQuiet(sessName string) bool {
 
 func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same bool, attempts int, last time.Time) {
 	same = strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey]) == target.ID &&
-		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef
+		strings.TrimSpace(s.Metadata[executionClaimNudgeStoreRefKey]) == target.StoreRef &&
+		strings.TrimSpace(s.Metadata[executionClaimNudgeTokenKey]) == strings.TrimSpace(s.Metadata["instance_token"])
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
+// content is the agent's configured claim nudge. A seat whose stamp shows the
+// marker's claim started this incarnation gets the held-claim text instead
+// when none is configured or the configured one carries --drain-ack
+// (heldClaimNudgeFor): its escalation is vetoed, so with nothing to send it
+// would wait at its prompt forever. A seat seen started on a pass whose stamp
+// write failed gets no default; escalatesNext holds it until the stamp lands.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
+	if beadID := s.Metadata[executionClaimNudgeWorkKey]; p.markedStarted(s, beadID) {
+		return heldClaimNudgeFor(p.cfg, s, beadID)
+	}
 	return claimNudgeFor(p.cfg, s)
+}
+
+// heldClaimNudgeFor is the claim nudge for a seat whose claim beadID has
+// started: its configured nudge, else defaultHeldClaimNudge naming the claim,
+// and "" when its template names no configured agent. A configured nudge that
+// carries --drain-ack is replaced by the default too.
+func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
+		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
+	}
+	return nudge
 }
 
 // revalidate re-reads the claim through the owning store's authoritative live
@@ -317,6 +508,17 @@ func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolut
 }
 
 func (p poolExecutionBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
+	// A new claim, or a new incarnation, starts without the old latch. A
+	// failed clear leaves the window unopened, so the next pass observes
+	// again rather than opening the new window under the old latch.
+	if s.Metadata[executionClaimNudgeStalledKey] != "" || s.Metadata[executionClaimNudgeStalledTokenKey] != "" {
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey:      "",
+			executionClaimNudgeStalledTokenKey: "",
+		}, executionClaimNudgeLabel, stdout) {
+			return
+		}
+	}
 	writeExecutionClaimMarker(store, s, target, 0, now, stdout)
 }
 
@@ -337,7 +539,7 @@ func (p poolExecutionBackstop) observeHold(store beads.Store, s *beads.Bead, rea
 		p.clearHold(store, s, stdout)
 		return
 	}
-	if cur := strings.TrimSpace(s.Metadata[executionClaimHoldKey]); cur == reason || strings.HasPrefix(cur, reason+" ") {
+	if holdIs(*s, reason) {
 		return
 	}
 	writeSessionMetadata(store, s, map[string]string{
@@ -455,6 +657,7 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
+		executionClaimNudgeTokenKey:    strings.TrimSpace(s.Metadata["instance_token"]),
 	}, "execution-claim-nudge", stdout)
 }
 
@@ -469,6 +672,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		executionClaimNudgeStoreRefKey,
 		executionClaimNudgeCountKey,
 		executionClaimNudgeAtKey,
+		executionClaimNudgeTokenKey,
 		executionClaimNudgeStalledKey,
 		executionClaimNudgeStalledTokenKey,
 		executionClaimHoldKey,

@@ -1084,6 +1084,7 @@ go_test(
         "effective_api_url_test.go",
         "embed_builtin_packs_test.go",
         "event_export_test.go",
+        "execution_backstop_evidence_test.go",
         "execution_backstop_test.go",
         "execution_emit_store_test.go",
         "execution_stalled_convergence_test.go",

@@ -426,9 +426,23 @@ func TestExecutionBackstopReEscalatesForANewIncarnation(t *testing.T) {
 	f.now = f.now.Add(2 * time.Minute)
 	f.idleFor(t, 10*time.Minute)
 	f.tick(t)
+	// The new incarnation starts its own window; it does not inherit the old
+	// one's spent grace and escalate on its first quiet tick.
+	if len(f.drained) != 1 || f.sessionMeta(t, executionClaimNudgeTokenKey) != "incarnation-2" || f.sessionMeta(t, executionClaimNudgeCountKey) != "0" {
+		t.Fatalf("first tick of a new incarnation: drains %v, marker token %q count %q; want no drain and a fresh observation for incarnation-2",
+			f.drained, f.sessionMeta(t, executionClaimNudgeTokenKey), f.sessionMeta(t, executionClaimNudgeCountKey))
+	}
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
 
 	if len(f.drained) != 2 {
-		t.Fatalf("drain requests after a new incarnation idles on the same claim = %v, want a second escalation", f.drained)
+		t.Fatalf("drain requests after a new incarnation idles out its own window on the same claim = %v, want a second escalation", f.drained)
 	}
 	if got := f.stalledEvents(); got != 2 {
 		t.Fatalf("execution.step_stalled events = %d, want one per escalated incarnation", got)
