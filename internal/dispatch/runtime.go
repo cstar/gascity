@@ -1164,11 +1164,14 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 			excludeRootSourceRef = strings.TrimSpace(current.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
 		}
 		nextID := strings.TrimSpace(current.Metadata[beadmeta.SourceBeadIDMetadataKey])
+		nextRef := strings.TrimSpace(current.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
+		if nextID == "" && hop == 0 {
+			nextID, nextRef = inputConvoySource(rootStore, current, opts, resolvedStores)
+		}
 		if nextID == "" {
 			opts.tracef("close-source-chain root=%s stop reason=no_source at_id=%s ref=%s", rootID, currentID, sourceChainStoreLabel(currentRef))
 			return nil
 		}
-		nextRef := strings.TrimSpace(current.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
 		effectiveRef := currentRef
 		nextStore := currentStore
 		if nextRef != "" {
@@ -1251,6 +1254,56 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 	err := fmt.Errorf("source chain depth limit reached after %d hops", maxSourceChainHops)
 	opts.tracef("close-source-chain root=%s stop reason=depth_limit max_hops=%d", rootID, maxSourceChainHops)
 	return err
+}
+
+// inputConvoySource resolves the work bead of a graph.v2 root slung on a convoy.
+// Such roots clear gc.source_bead_id and link back only through gc.input_convoy_id
+// (see collectInputConvoyWorkflowRoots), so without this hop a passing workflow
+// never closes the bead it was slung for. The convoy is read in the root's
+// gc.source_store_ref or gc.root_store_ref store and must track exactly one bead.
+// Best effort: any lookup failure leaves the source open (the pre-existing
+// behaviour) instead of blocking the root's finalization.
+func inputConvoySource(rootStore beads.Store, root beads.Bead, opts ProcessOptions, resolved map[string]beads.Store) (string, string) {
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		return "", ""
+	}
+	ref := strings.TrimSpace(root.Metadata[sourceworkflow.SourceStoreRefMetadataKey])
+	if ref == "" {
+		ref = strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey])
+	}
+	store := rootStore
+	if ref != "" {
+		if s, ok := resolved[ref]; ok {
+			store = s
+		} else if opts.ResolveStoreRef != nil {
+			s, err := opts.ResolveStoreRef(ref)
+			if err != nil || s == nil {
+				opts.tracef("close-source-chain root=%s stop reason=input_convoy_store_unresolved convoy=%s ref=%s err=%v", root.ID, convoyID, ref, err)
+				return "", ""
+			}
+			resolved[ref] = s
+			store = s
+		} else {
+			ref = ""
+		}
+	}
+	deps, err := store.DepList(convoyID, "down")
+	if err != nil {
+		opts.tracef("close-source-chain root=%s stop reason=input_convoy_unreadable convoy=%s ref=%s err=%v", root.ID, convoyID, sourceChainStoreLabel(ref), err)
+		return "", ""
+	}
+	var tracked []string
+	for _, dep := range deps {
+		if dep.IssueID == convoyID && dep.Type == "tracks" {
+			tracked = append(tracked, dep.DependsOnID)
+		}
+	}
+	if len(tracked) != 1 {
+		opts.tracef("close-source-chain root=%s stop reason=input_convoy_not_unique convoy=%s ref=%s tracked=%d", root.ID, convoyID, sourceChainStoreLabel(ref), len(tracked))
+		return "", ""
+	}
+	return tracked[0], ref
 }
 
 func listLiveSourceWorkflowRoots(fallbackStore beads.Store, sourceBeadID, sourceStoreRef, excludeRootID, excludeRootSourceRef string, opts ProcessOptions) ([]beads.Bead, error) {
