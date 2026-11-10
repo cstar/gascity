@@ -1264,6 +1264,10 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 	return err
 }
 
+// closeInputSourceMetadataKey opts a convoy-slung graph root into closing the
+// bead its input convoy tracks when the workflow passes (PortHarbour po-7h6t).
+const closeInputSourceMetadataKey = "gc.close_input_source"
+
 // openChildIDs lists the non-terminal children of id. Best effort: a listing
 // error returns nil, so the close is attempted as before.
 func openChildIDs(store beads.Store, id string) []string {
@@ -1290,6 +1294,13 @@ func openChildIDs(store beads.Store, id string) []string {
 func inputConvoySource(rootStore beads.Store, root beads.Bead, opts ProcessOptions, resolved map[string]beads.Store) (string, string) {
 	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
 	if convoyID == "" {
+		return "", ""
+	}
+	// Opt-in: a graph workflow "passes" once its steps are closed, which for Evo
+	// formulas does not mean the work is done (a review may ask for changes, the PR
+	// may stay unmerged). Only roots that say so close their slung bead.
+	if strings.TrimSpace(root.Metadata[closeInputSourceMetadataKey]) != "true" {
+		opts.tracef("close-source-chain root=%s stop reason=input_convoy_not_opted_in convoy=%s", root.ID, convoyID)
 		return "", ""
 	}
 	ref := strings.TrimSpace(root.Metadata[sourceworkflow.SourceStoreRefMetadataKey])

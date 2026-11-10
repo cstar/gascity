@@ -35,10 +35,11 @@ func newInputConvoyFixture(t *testing.T, tracked int) inputConvoyFixture {
 		Title: "evo-simple",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-			"gc.input_convoy_id":  convoy.ID,
-			"gc.root_store_ref":   "rig:test",
+			"gc.kind":               "workflow",
+			"gc.formula_contract":   "graph.v2",
+			"gc.input_convoy_id":    convoy.ID,
+			"gc.root_store_ref":     "rig:test",
+			"gc.close_input_source": "true",
 		},
 	})
 	cleanup := mustCreateWorkflowBead(t, f.infra, beads.Bead{
@@ -124,5 +125,25 @@ func TestProcessWorkflowFinalizeLeavesSourceWithOpenChildOpenWithoutError(t *tes
 	after, _ := f.rig.Get(f.product.ID)
 	if after.Status == "closed" {
 		t.Fatalf("product closed although it has an open child")
+	}
+}
+
+// Seen live 2026-11-10 (car-4vn4.12.2): an Evo workflow "passes" once its steps are closed,
+// even when the review asked for changes and the PR was not merged. Closing the slung bead on
+// pass is therefore opt-in: without gc.close_input_source=true on the root it stays open.
+func TestProcessWorkflowFinalizeLeavesInputConvoyBeadOpenWithoutOptIn(t *testing.T) {
+	t.Parallel()
+	f := newInputConvoyFixture(t, 1)
+	if err := f.infra.SetMetadata(f.workflow.ID, "gc.close_input_source", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProcessControl(f.infra, f.finalizer, ProcessOptions{ResolveStoreRef: f.resolver}); err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if root, _ := f.infra.Get(f.workflow.ID); root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", root.Status)
+	}
+	if after, _ := f.rig.Get(f.product.ID); after.Status == "closed" {
+		t.Fatalf("product closed without gc.close_input_source opt-in")
 	}
 }
