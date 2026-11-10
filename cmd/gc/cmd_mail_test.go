@@ -5222,3 +5222,58 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 		t.Errorf("Description = %q, want %q (--all -m flag body should win over positional)", msg.Description, "flag body")
 	}
 }
+
+// PortHarbour po-t25w (2026-11-09): a sender checked its own --notify question with
+// `gc mail read`, which marked it read for the recipient; the retention sweep then closed it
+// before the recipient ever saw it. A sender that is not a recipient only views the message.
+func TestMailReadBySenderDoesNotMarkRecipientCopyRead(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "skipper-dub-studio")
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	sent, err := mp.Send("skipper-dub-studio", "charpentier", "Question", "how do I resume?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doMailRead(mp, events.Discard, []string{sent.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailRead = %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "how do I resume?") {
+		t.Errorf("stdout = %q, want the body", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not marked read") {
+		t.Errorf("stderr = %q, want a not-marked-read notice", stderr.String())
+	}
+	inbox, err := mp.Inbox("charpentier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != sent.ID {
+		t.Fatalf("recipient inbox = %+v, want the message still unread", inbox)
+	}
+}
+
+func TestMailReadByRecipientStillMarksRead(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "charpentier")
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	sent, err := mp.Send("skipper-dub-studio", "charpentier", "Question", "how do I resume?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doMailRead(mp, events.Discard, []string{sent.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailRead = %d; stderr: %s", code, stderr.String())
+	}
+	inbox, err := mp.Inbox("charpentier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 0 {
+		t.Fatalf("recipient inbox = %+v, want empty after reading", inbox)
+	}
+}

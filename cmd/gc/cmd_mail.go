@@ -2116,19 +2116,27 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 	}
 	id := args[0]
 
-	m, err := mp.Read(id)
-	telemetry.RecordMailOp(context.Background(), "read", err)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+	// A sender re-reading its own message (to check it went out) must not mark the
+	// recipient's copy read: the recipient would never see it in its inbox, and the
+	// read-mail retention sweep would close it (PortHarbour po-t25w, 2026-11-09).
+	m, err := mp.Get(id)
+	if err == nil && readerIsSenderOnly(m) {
+		telemetry.RecordMailOp(context.Background(), "peek", nil)
+		fmt.Fprintf(stderr, "gc mail read: %s is addressed to %s; shown but not marked read (you sent it). Use gc mail peek for mail outside your inbox.\n", id, m.To) //nolint:errcheck // best-effort stderr
+	} else {
+		m, err = mp.Read(id)
+		telemetry.RecordMailOp(context.Background(), "read", err)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail read: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		rec.Record(events.Event{
+			Type:    events.MailRead,
+			Actor:   eventActor(),
+			Subject: id,
+			Payload: mailEventPayload(nil),
+		})
 	}
-
-	rec.Record(events.Event{
-		Type:    events.MailRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
 
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, mailMessageJSONResult{
@@ -2143,6 +2151,28 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 	}
 
 	return 0
+}
+
+// readerIsSenderOnly reports whether the caller has a gc identity, sent m, and is
+// neither its recipient nor on its CC list. Without a gc identity (an operator
+// terminal) behaviour is unchanged.
+func readerIsSenderOnly(m mail.Message) bool {
+	if os.Getenv("GC_SESSION_ID") == "" && os.Getenv("GC_ALIAS") == "" && os.Getenv("GC_AGENT") == "" {
+		return false
+	}
+	me := map[string]bool{}
+	for _, c := range defaultMailIdentityCandidates() {
+		me[c] = true
+	}
+	if !me[strings.TrimSpace(m.From)] || me[strings.TrimSpace(m.To)] {
+		return false
+	}
+	for _, cc := range m.CC {
+		if me[strings.TrimSpace(cc)] {
+			return false
+		}
+	}
+	return true
 }
 
 func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {

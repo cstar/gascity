@@ -357,7 +357,7 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	if !hasLabel(b.Labels, "read") {
 		if err := p.store.Update(id, beads.UpdateOpts{
 			Labels:   []string{"read"},
-			Metadata: map[string]string{"mail.read": "true"},
+			Metadata: readMetadata(),
 		}); err != nil {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
@@ -378,7 +378,7 @@ func (p *Provider) MarkRead(id string) error {
 	}
 	return p.store.Update(id, beads.UpdateOpts{
 		Labels:   []string{"read"},
-		Metadata: map[string]string{"mail.read": "true"},
+		Metadata: readMetadata(),
 	})
 }
 
@@ -929,6 +929,22 @@ func readMessagesBefore(store beads.Store, before time.Time, limit int) ([]beads
 	})
 }
 
+// ReadAtMetadataKey stamps when a message was marked read. The retention sweep
+// counts from it, so a message read long after it was sent is not swept minutes
+// after its recipient first saw it (PortHarbour po-t25w).
+const ReadAtMetadataKey = "mail.read_at"
+
+func readMetadata() map[string]string {
+	return map[string]string{"mail.read": "true", ReadAtMetadataKey: time.Now().UTC().Format(time.RFC3339)}
+}
+
+// readAfter reports whether b was marked read after cutoff. Beads without a
+// read stamp (read before the stamp existed) keep the creation-time rule.
+func readAfter(b beads.Bead, cutoff time.Time) bool {
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(b.Metadata[ReadAtMetadataKey]))
+	return err == nil && at.After(cutoff)
+}
+
 // RetentionSweepCloseReason is the canonical close_reason the read-mail
 // retention sweep stamps on a message bead before closing it. It is the marker
 // that tells isRemovedMessageBead a closed message bead is system-aged
@@ -969,7 +985,7 @@ func SweepReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int,
 		if limit > 0 && closed >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if b.Status != "open" || readAfter(b, cutoff) {
 			continue
 		}
 		if err := store.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
@@ -999,7 +1015,7 @@ func CountReadMessagesBefore(store beads.MailStore, cutoff time.Time, limit int)
 		if limit > 0 && count >= limit {
 			break
 		}
-		if b.Status != "open" {
+		if b.Status != "open" || readAfter(b, cutoff) {
 			continue
 		}
 		count++
@@ -1047,7 +1063,7 @@ func PurgeReadMessageWisps(store beads.MailStore, cutoff time.Time) (int, error)
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("live re-verify of bead %q before delete: %w", entry.ID, err))
 			continue
 		}
-		if current.Metadata[mail.ReadMetadataKey] != "true" {
+		if current.Metadata[mail.ReadMetadataKey] != "true" || readAfter(current, cutoff) {
 			continue
 		}
 		if err := deleteMessageWispBead(store.Store, entry.ID); err != nil {

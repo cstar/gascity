@@ -595,3 +595,52 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// PortHarbour po-t25w: retention counts from when a message was read, not from when it was
+// sent — a mail read late must not be swept minutes later.
+func TestSweepReadMessagesBefore_SparesMailReadAfterCutoff(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	seed := []beads.Bead{
+		readMailSeed("read-late", old, func(b *beads.Bead) {
+			b.Metadata = map[string]string{"mail.read_at": now.Add(time.Minute).Format(time.RFC3339)}
+		}),
+		readMailSeed("read-early", old, func(b *beads.Bead) {
+			b.Metadata = map[string]string{"mail.read_at": now.Add(-time.Hour).Format(time.RFC3339)}
+		}),
+		readMailSeed("no-read-stamp", old),
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	closed, closeErrs, listErr := SweepReadMessagesBefore(beads.MailStore{Store: store}, now, 0, RetentionSweepCloseReason)
+	if listErr != nil || len(closeErrs) != 0 {
+		t.Fatalf("errors: list=%v close=%v", listErr, closeErrs)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2 (read-early and no-read-stamp)", closed)
+	}
+	if b, _ := store.Get("read-late"); b.Status != "open" {
+		t.Fatalf("read-late status = %q, want open", b.Status)
+	}
+	if n, err := CountReadMessagesBefore(beads.MailStore{Store: store}, now, 0); err != nil || n != 0 {
+		t.Fatalf("count after sweep = %d, %v; want 0 (read-late spared)", n, err)
+	}
+}
+
+func TestReadAndMarkReadStampReadAt(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := New(store)
+	a, _ := mp.Send("a", "b", "s", "x")
+	c, _ := mp.Send("a", "b", "s", "y")
+	if _, err := mp.Read(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := mp.MarkRead(c.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{a.ID, c.ID} {
+		b, _ := store.Get(id)
+		if _, err := time.Parse(time.RFC3339, b.Metadata["mail.read_at"]); err != nil {
+			t.Errorf("%s mail.read_at = %q, want RFC3339", id, b.Metadata["mail.read_at"])
+		}
+	}
+}
