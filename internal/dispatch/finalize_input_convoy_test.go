@@ -106,3 +106,23 @@ func TestProcessWorkflowFinalizeToleratesUnresolvableInputConvoy(t *testing.T) {
 		t.Fatalf("root status = %q, want closed", root.Status)
 	}
 }
+
+// Seen live 2026-11-09 (ds-wc1g.14.9): the product had an open follow-up child, bd refused the
+// close ("1 open child issue(s)"), and the finalizer was quarantined with a hard error. A source
+// with open children must stay open WITHOUT failing finalization.
+func TestProcessWorkflowFinalizeLeavesSourceWithOpenChildOpenWithoutError(t *testing.T) {
+	t.Parallel()
+	f := newInputConvoyFixture(t, 1)
+	mustCreateWorkflowBead(t, f.rig, beads.Bead{Title: "Follow-up", Type: "task", ParentID: f.product.ID})
+	if _, err := ProcessControl(f.infra, f.finalizer, ProcessOptions{ResolveStoreRef: f.resolver}); err != nil {
+		t.Fatalf("finalize must not fail when the source has an open child: %v", err)
+	}
+	root, _ := f.infra.Get(f.workflow.ID)
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", root.Status)
+	}
+	after, _ := f.rig.Get(f.product.ID)
+	if after.Status == "closed" {
+		t.Fatalf("product closed although it has an open child")
+	}
+}

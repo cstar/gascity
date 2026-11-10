@@ -1221,6 +1221,14 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 				stopWalk = true
 				return nil
 			}
+			// A source with open child issues (follow-up work filed under it) is not
+			// done: bd refuses to close it, and that refusal used to fail and
+			// quarantine the whole finalizer. Leave it open for a human instead.
+			if open := openChildIDs(nextStore, nextID); len(open) > 0 {
+				opts.tracef("close-source-chain root=%s stop reason=open_children source=%s ref=%s children=%s", rootID, nextID, sourceChainStoreLabel(effectiveRef), strings.Join(open, ","))
+				stopWalk = true
+				return nil
+			}
 			if !mutate {
 				return nil
 			}
@@ -1254,6 +1262,22 @@ func walkSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptio
 	err := fmt.Errorf("source chain depth limit reached after %d hops", maxSourceChainHops)
 	opts.tracef("close-source-chain root=%s stop reason=depth_limit max_hops=%d", rootID, maxSourceChainHops)
 	return err
+}
+
+// openChildIDs lists the non-terminal children of id. Best effort: a listing
+// error returns nil, so the close is attempted as before.
+func openChildIDs(store beads.Store, id string) []string {
+	children, err := store.Children(id)
+	if err != nil {
+		return nil
+	}
+	var open []string
+	for _, child := range children {
+		if status := strings.TrimSpace(child.Status); status != "closed" && status != "tombstone" {
+			open = append(open, child.ID)
+		}
+	}
+	return open
 }
 
 // inputConvoySource resolves the work bead of a graph.v2 root slung on a convoy.
