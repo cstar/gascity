@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -561,7 +562,10 @@ func TestConvoyStoreHandleGroupsKeepsOneGoroutinePerStore(t *testing.T) {
 		}
 		order = append(order, i)
 		mu.Unlock()
-		time.Sleep(time.Millisecond)
+		// Yield so another goroutine gets the chance to overlap this one.
+		for range 100 {
+			runtime.Gosched()
+		}
 		mu.Lock()
 		active[store]--
 		mu.Unlock()
