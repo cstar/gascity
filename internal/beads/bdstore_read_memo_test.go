@@ -562,3 +562,33 @@ func TestReadMemoCachingStoreReconcileAtConstantHash(t *testing.T) {
 		t.Fatalf("cache holds %d beads, want 3", len(memo.beads))
 	}
 }
+
+// The ready veto's exact-id blocker lookup is a pure bd list, so at a constant
+// hash the second Ready reruns only bd ready itself.
+func TestReadMemoReadyBlockerLookupIsMemoized(t *testing.T) {
+	respond := func(args []string) ([]byte, error) {
+		switch args[0] {
+		case "ready":
+			return []byte(`[{"id":"ga-dep","title":"dep","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","dependency_count":1,"dependencies":[{"issue_id":"ga-dep","depends_on_id":"ga-blocker","type":"blocks"}]}]`), nil
+		case "list":
+			return []byte(`[{"id":"ga-blocker","title":"blocker","status":"closed","issue_type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.work_outcome":"blocked"}}]`), nil
+		}
+		return []byte(`[]`), nil
+	}
+	store, runner, _ := newMemoTestStore(t, respond)
+	for i := 0; i < 2; i++ {
+		got, err := store.Ready()
+		if err != nil {
+			t.Fatalf("Ready %d: %v", i, err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("Ready %d = %+v, want the dependent vetoed", i, got)
+		}
+	}
+	if got := runner.count("ready"); got != 2 {
+		t.Fatalf("bd ready calls = %d, want 2", got)
+	}
+	if got := runner.count("list"); got != 1 {
+		t.Fatalf("bd list blocker lookups = %d, want 1 (the second is a memo hit)", got)
+	}
+}
