@@ -591,152 +591,14 @@ func TestControlGraphExtraLegSkipsARefusingBinding(t *testing.T) {
 	})
 }
 
-// TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback pins the two scan
-// arms to one routing rule.
-//
-// The serve loop takes the CACHE arm first on every tick; the fallback runs only
-// when a leg is dirty, still priming, or the bd compatibility mode needs a tier
-// CachedReady cannot serve. So the cache arm is the production path, and the two
-// agreeing about WHICH ledgers hold this scope's queue is the whole safety
-// property: a queue drawn from a different set of stores than the dispatch
-// mutates is exactly the divergence this defect was.
-//
-// Asserted structurally — leg count and the binding's position — rather than by
-// comparing scan output, because the two arms legitimately return different bead
-// values (one snapshots, one reads live) and only their ROUTING has to match.
-func TestControlReadyCacheSourcesRouteTheSameLegsAsTheFallback(t *testing.T) {
-	t.Run("split rig scope snapshots its own store AND the binding", func(t *testing.T) {
-		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
-		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-
-		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
-		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a split rig scope: %v", err)
-		}
-		if len(sources) != 2 {
-			t.Fatalf("cache sources for a split rig scope = %d leg(s), want 2; "+
-				"the cached arm reads a narrower set than the fallback and the queue flips with cache freshness", len(sources))
-		}
-		if sameStorePtr(sources[0], binding) {
-			t.Errorf("cache leg[0] is the binding, want the scope's own store first; leg order decides which copy wins on a co-resident id")
-		}
-		if !sameStorePtr(sources[1], binding) {
-			t.Errorf("cache leg[1] = %T, want the city graph binding; the beads a city molecule routed to this rig stay unread on the cached arm", sources[1])
-		}
-		// Only the scoped leg is owned; the process-shared binding must never be
-		// closed by the per-prime cleanup.
-		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
-			t.Errorf("owned = %d leg(s), want exactly the scope's own store; the shared binding must not be in owned", len(owned))
-		}
-		for _, o := range owned {
-			if sameStorePtr(o, binding) {
-				t.Errorf("owned includes the shared graph binding; closing it would poison every later graph-class op")
-			}
-		}
-	})
-
-	t.Run("split city scope snapshots only the binding", func(t *testing.T) {
-		cityPath, _, binding := rigFederationFixture(t, `[]`)
-		seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
-
-		sources, owned, err := controlReadyCacheSources(cityPath, cityPath, nil)
-		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a split city scope: %v", err)
-		}
-		if len(sources) != 1 || !sameStorePtr(sources[0], binding) {
-			t.Fatalf("cache sources for a split city scope = %d leg(s), want exactly the binding; "+
-				"unioning the work store back in re-offers the frozen copies the migration retained", len(sources))
-		}
-		// A relocated city reads only the shared binding, which this call did not
-		// open, so nothing is owned.
-		if len(owned) != 0 {
-			t.Errorf("owned = %d leg(s), want 0; the relocated-city arm reads only the process-shared binding", len(owned))
-		}
-	})
-
-	t.Run("single-store rig scope snapshots one store", func(t *testing.T) {
-		cityPath, rigPath, binding := rigFederationFixture(t, `[]`)
-		seedCLIStorageRoutes(t, cityPath, nil)
-
-		sources, owned, err := controlReadyCacheSources(rigPath, cityPath, nil)
-		if err != nil {
-			t.Fatalf("controlReadyCacheSources for a single-store rig scope: %v", err)
-		}
-		if len(sources) != 1 {
-			t.Fatalf("cache sources for a single-store rig scope = %d leg(s), want 1; "+
-				"a city with no [storage] section must take none of the federation", len(sources))
-		}
-		if sameStorePtr(sources[0], binding) {
-			t.Errorf("the single leg is the unrouted binding, want the scope's own store")
-		}
-		// The lone scoped leg is call-owned and must be closed after priming.
-		if len(owned) != 1 || !sameStorePtr(owned[0], sources[0]) {
-			t.Errorf("owned = %d leg(s), want exactly the scope's own store", len(owned))
-		}
-	})
-}
-
-// TestCachedControlReadyUnionRequiresEveryLeg pins all-or-nothing.
-//
-// A federated scope's queue is only complete if every leg answered. Returning
-// the warm legs' beads when one is cold would be indistinguishable from a
-// complete answer at the call site — the fallback would never run, and the scan
-// would silently report a short queue as the whole queue. That is the same
-// "exit 0, empty array, no work" shape as the defect this federation fixes, just
-// intermittent, which is worse.
-func TestCachedControlReadyUnionRequiresEveryLeg(t *testing.T) {
-	newPrimed := func(t *testing.T, title string) (*beads.CachingStore, string) {
-		t.Helper()
-		store := beads.NewMemStore()
-		bead, err := store.Create(beads.Bead{Title: title, Type: "task"})
-		if err != nil {
-			t.Fatalf("seed %s: %v", title, err)
-		}
-		cache := beads.NewCachingStore(store, nil)
-		if err := cache.PrimeActive(); err != nil {
-			t.Fatalf("prime %s: %v", title, err)
-		}
-		return cache, bead.ID
-	}
-
-	warm, warmID := newPrimed(t, "warm leg")
-	other, otherID := newPrimed(t, "second warm leg")
-	cold := beads.NewCachingStore(beads.NewMemStore(), nil)
-
-	// PREMISE: an unprimed cache really is cold, so the negative below is about
-	// the union's policy and not about a cache that happens to answer anyway.
-	if _, ok := cold.CachedReady(); ok {
-		t.Fatal("premise failed: an unprimed CachingStore answered CachedReady; this test cannot show a cold leg forces the fallback")
-	}
-
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, cold}); ok {
-		t.Errorf("cachedControlReadyUnion with one cold leg = (%d bead(s), true), want a miss; "+
-			"a partial union reads as a complete queue and the fallback never runs", len(got))
-	}
-	if got, ok := cachedControlReadyUnion([]*beads.CachingStore{cold, warm}); ok {
-		t.Errorf("cachedControlReadyUnion with the cold leg FIRST = (%d bead(s), true), want a miss; "+
-			"leg order must not decide whether a short answer escapes", len(got))
-	}
-
-	// The control: every leg warm unions, so the miss above is the cold leg and
-	// not the union refusing to merge at all.
-	got, ok := cachedControlReadyUnion([]*beads.CachingStore{warm, other})
-	if !ok {
-		t.Fatal("cachedControlReadyUnion with every leg warm missed; the cached arm can never answer a federated scope and every tick pays the fallback")
-	}
-	if !containsID(got, warmID) || !containsID(got, otherID) {
-		t.Errorf("warm union = %v, want both %s and %s; one leg's beads were dropped", controlLegIDs(got), warmID, otherID)
-	}
-}
-
 // TestControlReadyScanRigScopeFederatesTheBindingOnBothArms is the end-to-end
 // producer assertion, taken through the exact entry point the serve loop calls.
 //
 // The three fallback tests above call controlReadyFallbackReady directly, which
 // leaves the production path — nextWorkflowServeBeads ->
-// tryControlReadyFromCacheOrFallback -> the cache arm — unexercised for a
-// federated scope. This runs the real entry for both arms against one fixture,
-// so cache/fallback parity is pinned on OUTPUT and not only on routing.
+// tryControlReadyFromCacheOrFallback — unexercised for a federated scope. This
+// runs the real entry for both ready tiers (default, and the bd-1.0.5
+// --include-ephemeral one) against one fixture.
 func TestControlReadyScanRigScopeFederatesTheBindingOnBothArms(t *testing.T) {
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
 	route := agentCfg.QualifiedName()
@@ -747,8 +609,8 @@ func TestControlReadyScanRigScopeFederatesTheBindingOnBothArms(t *testing.T) {
 		name  string
 		beads config.BeadsConfig
 	}{
-		{name: "cached arm", beads: config.BeadsConfig{}},
-		{name: "fallback arm", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		{name: "default tier", beads: config.BeadsConfig{}},
+		{name: "bd-1.0.5 include-ephemeral tier", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, rigPath, binding := rigFederationFixture(t, rigResident)

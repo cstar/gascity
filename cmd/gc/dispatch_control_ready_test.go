@@ -198,8 +198,8 @@ func TestMergeControlReadyGroupsSkipsInstantiatingWithoutMarkingSeen(t *testing.
 // TestEvaluateControlReadyMatchesShellQueryPriority ports
 // TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging's
 // scenario (cmd_convoy_dispatch_test.go) at the Go level: given the same
-// parsed query + env, and a ready set shaped like what CachedReady/the
-// batched fallback would return, evaluateControlReady must merge candidates
+// parsed query + env, and a ready set shaped like what the batched read
+// would return, evaluateControlReady must merge candidates
 // before routes and drop later ID duplicates exactly like the shell's jq
 // reduce does.
 func TestEvaluateControlReadyMatchesShellQueryPriority(t *testing.T) {
@@ -279,80 +279,7 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-// --- End-to-end: nextWorkflowServeBeads wiring (cache + fallback) ---
-
-// setUpControlReadyFileStoreCity builds a scope-local FileStore-backed city
-// so tryControlReadyFromCacheOrFallback's cache path can PrimeActive() and
-// CachedReady() without any bd/dolt process at all, and returns the opened
-// store for seeding fixture beads directly.
-func setUpControlReadyFileStoreCity(t *testing.T) (cityDir string, store *beads.FileStore) {
-	t.Helper()
-	configureIsolatedRuntimeEnv(t)
-	t.Setenv("GC_BEADS", "file")
-
-	cityDir = t.TempDir()
-	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
-		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
-		t.Fatalf("ensurePersistedScopeLocalFileStore: %v", err)
-	}
-	store, err := openScopeLocalFileStore(cityDir)
-	if err != nil {
-		t.Fatalf("openScopeLocalFileStore: %v", err)
-	}
-	return cityDir, store
-}
-
-// noBDOnPathForTest ensures no bd (or bd stub) is reachable via PATH, so a
-// test can prove a code path made zero subprocess calls: any shell-out would
-// fail with "command not found" rather than silently succeeding.
-func noBDOnPathForTest(t *testing.T) {
-	t.Helper()
-	t.Setenv("PATH", t.TempDir())
-}
-
-func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCalls(t *testing.T) {
-	cityDir, store := setUpControlReadyFileStoreCity(t)
-	noBDOnPathForTest(t)
-
-	target := "gascity/control-dispatcher"
-	ready, err := store.Create(beads.Bead{Assignee: target, Type: "task"})
-	if err != nil {
-		t.Fatalf("create ready bead: %v", err)
-	}
-	epic, err := store.Create(beads.Bead{Assignee: target, Type: "epic"})
-	if err != nil {
-		t.Fatalf("create epic bead: %v", err)
-	}
-	routed, err := store.Create(beads.Bead{Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target}})
-	if err != nil {
-		t.Fatalf("create routed bead: %v", err)
-	}
-
-	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
-	query := workflowServeControlReadyQuery(agentCfg)
-
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
-	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
-	}
-	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
-	}
-
-	var gotIDs []string
-	for _, b := range queue {
-		gotIDs = append(gotIDs, b.ID)
-	}
-	wantIDs := []string{ready.ID, routed.ID}
-	if !stringSlicesEqual(gotIDs, wantIDs) {
-		t.Fatalf("queue ids = %#v, want %#v (epic bead %s must be excluded)", gotIDs, wantIDs, epic.ID)
-	}
-}
+// --- End-to-end: nextWorkflowServeBeads wiring (one batched read per sweep) ---
 
 func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
@@ -365,11 +292,11 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable
-// forces the cache path to fail (PrimeActive against a bd stub that errors on
-// `list`) and asserts the fallback makes exactly one bd invocation covering
-// the whole tick, not the shell script's N per-candidate/route calls.
-func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+// TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCall asserts the
+// scan makes exactly one bd ready invocation covering the whole tick, not the
+// shell script's N per-candidate/route calls. The stub still fails `list` so a
+// store prime sneaking back in would surface as an error, not a pass.
+func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCall(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -527,5 +454,90 @@ printf '[{"id":"ga-plain"}]'
 	}
 	if len(got) != 1 || got[0].ID != "ga-plain" {
 		t.Fatalf("nextWorkflowServeBeads = %#v, want [{ga-plain}]", got)
+	}
+}
+
+// TestNextWorkflowServeBeadsIdleRigSweepIsOneBatchedBDReady pins the idle cost
+// of a control-dispatcher sweep at a rig scope (ga-yhp): every sweep is exactly
+// one batched `bd ready` and nothing else. The control-ready cache this replaced
+// primed a CachingStore on every sweep (bd version, two bd list, two ephemeral
+// bd query, bd sql) and loaded the city config to do it, yet never answered, so
+// each sweep paid seven bd processes for the one ready read it used.
+//
+// Two sweeps run back to back because a per-sweep cost is what has to be pinned:
+// a single call cannot tell "one read per sweep" from "one prime, then reuse".
+func TestNextWorkflowServeBeadsIdleRigSweepIsOneBatchedBDReady(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fixture")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir city runtime root: %v", err)
+	}
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[rigs]]\nname = \"fixture\"\npath = \"rigs/fixture\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	// A rig-scoped dispatcher finds its city through GC_CITY (see
+	// rigFederationFixture). No [storage] split: the scope's own bd is the only leg.
+	t.Setenv("GC_CITY", cityPath)
+	seedCLIStorageRoutes(t, cityPath, nil)
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "fixture"}
+	target := agentCfg.QualifiedName()
+	readyArgs := fmt.Sprintf("--readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  %q)
+    printf '[{"id":"fx-mine","issue_type":"task","status":"open","metadata":{"%s":"%s"}},{"id":"fx-other","issue_type":"task","status":"open","metadata":{"%s":"other/control-dispatcher"}}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`, logPath, readyArgs, beadmeta.RoutedToMetadataKey, target, beadmeta.RoutedToMetadataKey)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+
+	query := workflowServeControlReadyQueryForBeads(agentCfg, config.BeadsConfig{})
+	for sweep := 1; sweep <= 2; sweep++ {
+		queue, err := nextWorkflowServeBeads(query, rigPath, nil)
+		if err != nil {
+			t.Fatalf("sweep %d: nextWorkflowServeBeads: %v", sweep, err)
+		}
+		var ids []string
+		for _, item := range queue {
+			ids = append(ids, item.ID)
+		}
+		if !stringSlicesEqual(ids, []string{"fx-mine"}) {
+			t.Errorf("sweep %d: queue = %v, want [fx-mine]: the bead routed to %s, and not the one routed to another dispatcher", sweep, ids, target)
+		}
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	for _, call := range calls {
+		for _, field := range strings.Fields(call) {
+			switch field {
+			case "list", "query", "sql", "version":
+				t.Errorf("bd %s ran during an idle sweep: %q; a sweep must not prime a store", field, call)
+			}
+		}
+	}
+	if len(calls) != 2 || calls[0] != readyArgs || calls[1] != readyArgs {
+		t.Fatalf("bd calls over two sweeps = %d, want exactly 2 x %q; all calls:\n%s", len(calls), readyArgs, string(logData))
 	}
 }

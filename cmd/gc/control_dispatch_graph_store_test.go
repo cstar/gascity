@@ -182,19 +182,6 @@ func TestControlDispatchSingleStoreUsesTheOneStore(t *testing.T) {
 	}
 }
 
-// resetControlReadyCache clears the per-dir readiness snapshot registry so a
-// test observes a fresh scan rather than one memoized inside controlReadyCacheTTL.
-func resetControlReadyCache(t *testing.T) {
-	t.Helper()
-	flush := func() {
-		controlReadyCacheRegistry.mu.Lock()
-		defer controlReadyCacheRegistry.mu.Unlock()
-		controlReadyCacheRegistry.byDir = make(map[string]*controlReadyCacheEntry)
-	}
-	flush()
-	t.Cleanup(flush)
-}
-
 // newRoutedControlBead writes a control bead routed to the control dispatcher,
 // so the readiness scan's route filter admits it.
 func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string) beads.Bead {
@@ -212,7 +199,6 @@ func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string)
 // comes from, for a control dispatcher whose scope directory is dir.
 func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg config.BeadsConfig) []string {
 	t.Helper()
-	resetControlReadyCache(t)
 	queue, handled, err := tryControlReadyFromCacheOrFallback(
 		workflowServeControlReadyQueryForBeads(agentCfg, beadsCfg), dir, nil)
 	if err != nil {
@@ -241,11 +227,9 @@ func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg 
 // the binding, which a work-store scan never reads, so the workflow cannot
 // advance past its first hop.
 //
-// Both arms of the scan are covered, because they reach the store by different
-// routes: the cached arm wraps a CachingStore around the resolved class store,
-// and the fallback arm (taken under bd-1.0.5 compatibility, which needs a tier
-// CachedReady cannot serve) would otherwise shell `bd ready` in a directory that
-// no longer holds the class.
+// Both ready tiers are covered: the default one, and the --include-ephemeral one
+// bd-1.0.5 compatibility asks for, which would otherwise shell `bd ready` in a
+// directory that no longer holds the class.
 func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
 	route := agentCfg.QualifiedName()
@@ -254,8 +238,8 @@ func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 		name  string
 		beads config.BeadsConfig
 	}{
-		{name: "cached arm", beads: config.BeadsConfig{}},
-		{name: "fallback arm", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		{name: "default tier", beads: config.BeadsConfig{}},
+		{name: "bd-1.0.5 include-ephemeral tier", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()

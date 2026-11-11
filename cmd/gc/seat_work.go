@@ -81,7 +81,8 @@ func newSeatWorkIndex(cityPath string, cfg *config.City, leading beads.Store, ri
 	return &seatWorkIndex{cityPath: cityPath, cfg: cfg, leading: leading, rigs: rigs}
 }
 
-// read lists every leg once, concurrently: one live list per status, both tiers.
+// read lists every leg once, concurrently: one live list per status, both tiers,
+// straight from each leg's backing.
 func (x *seatWorkIndex) read() {
 	plan, err := assignedWorkSweepPlan(x.cityPath, x.cfg, x.leading, x.rigs, nil)
 	if err != nil {
@@ -102,7 +103,13 @@ func (x *seatWorkIndex) read() {
 			defer wg.Done()
 			defer recoverLeg(&errs[i], "seat work index leg", log.Writer())
 			leg, status := x.legs[i/len(seatWorkStatuses)], seatWorkStatuses[i%len(seatWorkStatuses)]
-			lists[i], errs[i] = leg.store.List(beads.ListQuery{Status: status, TierMode: beads.TierBoth, Live: true})
+			// The live handle reads the backing (bd's --status filter) without
+			// refreshing the cache. CachingStore.List(Live) re-read with one bd
+			// show, every tick, each cached row that list leaves out -- every
+			// deferred or blocked bead, which the cache holds folded to open
+			// (ga-yhp). The handle sets Live and TierBoth itself; the class view
+			// is peeled because only the stores under it carry Handles.
+			lists[i], errs[i] = beads.HandlesFor(unwrapClassStore(leg.store)).Live.List(beads.ListQuery{Status: status})
 		}(i)
 	}
 	wg.Wait()
