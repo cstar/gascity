@@ -3,16 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -20,9 +16,18 @@ import (
 // control-dispatcher's per-tick readiness scan (workflowServeControlReadyQueryForBeads,
 // dispatch_runtime.go) builds a shell script that fork-execs up to ~9
 // bd/jq processes per agent per tick. Wire that same readiness evaluation to
-// answer from an in-process CachingStore snapshot first, falling back to
-// exactly one batched `bd ready --json` call when the snapshot can't answer,
-// instead of the shell script's N separate `bd` invocations.
+// answer from exactly one batched read per sweep -- one `bd ready --json` call
+// in the scope directory, plus an in-process Ready on the graph binding when
+// the city split it out -- instead of the shell script's N separate `bd`
+// invocations.
+//
+// One batched read per sweep is the whole cost (ga-yhp). An in-process
+// CachingStore snapshot used to sit in front of it, primed on every sweep and
+// reused for three seconds. That prime cost six bd processes (bd version,
+// two bd list, two ephemeral bd query, bd sql) plus a full city-config load
+// (~0.5 s CPU), and on the live city it never answered: every sweep that primed
+// it still took the batched read. So the snapshot, and the config load it alone
+// needed, are gone; nothing here is cached across sweeps.
 //
 // Why this hooks into nextWorkflowServeBeads (the default workflowServeList
 // implementation) rather than drainWorkflowServeWork: workflowServeList is a
@@ -34,8 +39,7 @@ import (
 // its body here is additive: the exact query-string shape from
 // workflowServeControlReadyQueryForBeads is unchanged (still asserted upon by
 // TestWorkflowServeControlReadyQuery* tests), and any non-control-ready query
-// -- or any failure standing up the cache -- falls straight through to the
-// original shell exec, unchanged.
+// falls straight through to the original shell exec, unchanged.
 
 // controlReadyQueryMarkerPrefix identifies a workQuery produced by
 // workflowServeControlReadyQueryForBeads. That function always writes this
@@ -48,26 +52,17 @@ const controlReadyQueryMarkerPrefix = "BD_EXPORT_AUTO=false GC_CONTROL_TARGET="
 const controlReadyExcludeType = "epic"
 
 // controlReadyFallbackLimit bounds the single batched bd ready call issued
-// when the cache can't answer. It must be generous enough that per-candidate/
+// on every sweep. It must be generous enough that per-candidate/
 // per-route filtering in Go (each capped at workflowServeScanLimit) is never
 // starved by an earlier truncation at the bd layer -- unlike the shell script
 // this replaces (which ran each candidate/route's own independently-capped bd
 // call), this single batched call's cap is shared across every candidate and
-// route, so it must hold a whole city's ready set even during the write
-// bursts that make the cache dirty in the first place. It costs one bd call
+// route, so it must hold a whole city's ready set even during write
+// bursts. It costs one bd call
 // regardless of value, so err on the generous side; controlReadyFallbackReady
 // also logs if a response ever comes back exactly at this limit, so silent
 // truncation is at least observable.
 const controlReadyFallbackLimit = 5000
-
-// controlReadyCacheTTL bounds how long a primed control-ready snapshot is
-// reused before the next tick re-primes it. A fresh CachingStore is built
-// per drain invocation's first tick and reused for every ready bead
-// processed in that invocation without any further bd calls; the TTL just
-// caps how stale that snapshot can get across invocations (e.g. across the
-// --follow loop's wake cycles) without needing a persistent, event-fed cache
-// for the life of the process.
-const controlReadyCacheTTL = 3 * time.Second
 
 // parsedControlReadyQuery holds the values workflowServeControlReadyQueryForBeads
 // bakes into its generated shell command as env-var prefix assignments.
@@ -185,8 +180,8 @@ func controlReadyRoutes(parsed parsedControlReadyQuery) []string {
 }
 
 // filterReadyByAssignee mirrors `bd ready --assignee=$cand --exclude-type=epic --limit=N`.
-// ready is expected to already be in canonical ready order (CachedReady/
-// SortBeadsReadyOrder), matching bd's own default (no --sort) ready order.
+// ready is expected to already be in canonical ready order
+// (SortBeadsReadyOrder), matching bd's own default (no --sort) ready order.
 func filterReadyByAssignee(ready []beads.Bead, assignee string, limit int) []beads.Bead {
 	var out []beads.Bead
 	for _, b := range ready {
@@ -260,8 +255,8 @@ func mergeControlReadyGroups(groups ...[]beads.Bead) []beads.Bead {
 }
 
 // evaluateControlReady answers a control-dispatcher readiness scan against an
-// already-fetched ready set (from CachedReady or the single batched
-// fallback), applying the exact candidate precedence, legacy/bare route
+// already-fetched ready set (the single batched read of
+// controlReadyFallbackReady), applying the exact candidate precedence, legacy/bare route
 // aliasing, and instantiating-metadata dedup that
 // workflowServeControlReadyQueryForBeads encodes as shell.
 func evaluateControlReady(ready []beads.Bead, parsed parsedControlReadyQuery, envList []string) []beads.Bead {
@@ -284,9 +279,9 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 	return out
 }
 
-// controlReadyFallbackReady answers the batched ready scan the in-process cache
-// could not: dirty, still priming, or a bd compatibility mode that requires
-// --include-ephemeral (a tier CachedReady can't serve).
+// controlReadyFallbackReady is the batched ready scan every control-ready sweep
+// reads: one call per leg, nothing reused from an earlier sweep. The "fallback"
+// name predates ga-yhp, when an in-process snapshot was tried first.
 //
 // It reads whichever ledger(s) the control dispatcher will actually dispatch
 // against, which controlGraphBinding and controlGraphExtraLeg answer between
@@ -409,174 +404,6 @@ func controlReadyBindingReady(dir string, binding beads.Store, includeEphemeral 
 	return result, nil
 }
 
-var controlReadyCacheRegistry = struct {
-	mu    sync.Mutex
-	byDir map[string]*controlReadyCacheEntry
-}{byDir: make(map[string]*controlReadyCacheEntry)}
-
-// controlReadyCacheEntry holds a primed snapshot per leg for one scope dir.
-// Its backing stores are closed when controlReadyCachesFor returns, once every
-// leg has primed, so an entry is a set of CLOSED-backing snapshots: it
-// may only be read through CachingStore.CachedReady, which answers entirely from
-// the in-memory snapshot. Any read that would need to touch the backing must
-// decline to controlReadyFallbackReady instead of consulting a closed handle.
-type controlReadyCacheEntry struct {
-	caches   []*beads.CachingStore
-	primedAt time.Time
-}
-
-// controlReadyCachesFor returns a short-lived, best-effort in-process ready
-// snapshot per leg for dir, reusing a set primed within controlReadyCacheTTL
-// instead of re-priming on every drain-loop tick. Returns nil whenever the
-// caches cannot be built or trusted; callers must treat nil as "fall back to a
-// live bd query", not as an error -- an unopenable store here is possible in
-// scopes this readiness scan does not normally run against (e.g. test fixtures
-// with no rig configured) and the sibling control-bead-processing path
-// (runControlDispatcherInStore) would already be failing loudly if it were a
-// real production gap.
-//
-// The snapshots are taken over the SAME ledgers
-// runControlDispatcherWithStoreAndConfig dispatches against —
-// controlReadyCacheSources applies the routing rule controlBeadLedger resolves
-// against — so the queue and the mutation are the same set. They must not
-// diverge. A queue drawn from the work store while the dispatch closes the
-// binding's copy re-offers the same id every tick -- ProcessControl no-ops on
-// the already-closed copy, and drainWorkflowServeWork counts a no-op as progress
-// -- so the drain loop never returns; and the beads the dispatch CREATES (fanout
-// fragments, retry attempts, drain units) would land in a ledger the scan never
-// reads, stalling the workflow at its first hop.
-//
-// A leg that fails to prime discards the whole set. A partial set would be a
-// short queue that reads as a complete one, which is the same silent-underread
-// shape as scanning the wrong ledger entirely.
-//
-// Known limitation (low-impact, not fixed here): concurrent callers racing a
-// stale/missing entry for the same dir each independently open+prime their
-// own stores rather than coalescing behind one in-flight prime -- last writer
-// into controlReadyCacheRegistry wins. Same class of gap already accepted
-// for CachingStore.List/Ready cache-miss reads; worth revisiting with a
-// singleflight if overlapping invocations against the same city/dir become
-// common (e.g. a restart handoff window), but the control-dispatcher serve
-// loop's typical call pattern is sequential-per-tick per dir. Note the entries
-// are keyed by scope dir, so on a split city every rig dispatcher primes the
-// shared city binding independently (ga-n6gnr). That race stays safe under the
-// per-prime close below: each caller closes only the scoped backing IT opened,
-// and the registry loser's CachingStores are pure in-memory snapshots
-// (CachedReady never touches a backing), so an overwritten entry is never a
-// use-after-close.
-func controlReadyCachesFor(dir, cityPath string, cfg *config.City) []*beads.CachingStore {
-	controlReadyCacheRegistry.mu.Lock()
-	entry, ok := controlReadyCacheRegistry.byDir[dir]
-	fresh := ok && time.Since(entry.primedAt) < controlReadyCacheTTL
-	controlReadyCacheRegistry.mu.Unlock()
-	if fresh {
-		return entry.caches
-	}
-
-	sources, owned, err := controlReadyCacheSourcesFn(dir, cityPath, cfg)
-	if err != nil {
-		return nil
-	}
-	// Release the scoped backing handles the instant the snapshot is fully in
-	// memory. NewCachingStore is passive here (nil onChange, StartReconciler is
-	// never called) and CachedReady serves entirely from the primed in-memory
-	// snapshot without touching the backing, so the backing only has to be open
-	// for the PrimeActive scan itself. Closing it per prime keeps each prime's
-	// read mark on the shared graph binding's WAL short-lived instead of held by
-	// a leaked handle until *sql.DB GC-finalize -- the leak that let the WAL grow
-	// unbounded because a passive checkpoint can never truncate past a live read
-	// mark. This defer fires on BOTH the prime-failure early return and the
-	// success path, so a prime that fails partway still closes whatever it
-	// opened. Only owned legs are closed; the graph binding is process-shared
-	// (see controlReadyCacheSources).
-	defer func() {
-		for _, s := range owned {
-			if err := closeBeadStoreHandle(s); err != nil {
-				log.Printf("control-ready cache: closing primed scope store for %s: %v", dir, err)
-			}
-		}
-	}()
-	caches := make([]*beads.CachingStore, 0, len(sources))
-	for _, source := range sources {
-		cs := beads.NewCachingStore(source, nil)
-		if err := cs.PrimeActive(); err != nil {
-			log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
-			return nil
-		}
-		caches = append(caches, cs)
-	}
-
-	controlReadyCacheRegistry.mu.Lock()
-	controlReadyCacheRegistry.byDir[dir] = &controlReadyCacheEntry{caches: caches, primedAt: time.Now()}
-	controlReadyCacheRegistry.mu.Unlock()
-	return caches
-}
-
-// controlReadyCacheSources returns the ordered ledgers to snapshot, applying the
-// same routing rule as controlReadyFallbackReady so the cached answer and the
-// fallback answer cannot disagree about which stores hold this scope's queue.
-//
-// owned is the subset of sources this call constructed and is therefore
-// responsible for closing once the snapshot has been primed into memory. It is
-// deliberately NOT every source. The graph-class binding legs
-// (controlGraphBinding / controlGraphExtraLeg) resolve through the per-city
-// cliStorageRoutes memo, so the binding store is process-shared and closed only
-// by closeCLIStorageRoutes at process exit; CloseStore is a one-way latch, so
-// closing a binding leg here would poison every later graph-class read and write
-// in the process with ErrStoreClosed. Only the scoped leg
-// (openControlStoreAtForCity) is freshly constructed per call, so only it is
-// returned as owned.
-//
-// An error return must not hand back opened stores. controlReadyCachesFor
-// registers its closing defer only after this call succeeds, so a store opened
-// before an error return would have nothing to close it. Today the sole error
-// return IS the failed open, so nothing is open on that path; an arm added
-// later that can fail after a successful open must close what it opened before
-// returning. The same obligation binds any controlReadyCacheSourcesFn seam.
-func controlReadyCacheSources(dir, cityPath string, cfg *config.City) (sources, owned []beads.Store, err error) {
-	// A relocated CITY scope does not open its scope store at all — that would
-	// be a bd process this scan never reads. The binding is process-shared, so
-	// nothing here owns it.
-	if binding, relocated := controlGraphBinding(cityPath, dir); relocated {
-		return []beads.Store{binding}, nil, nil
-	}
-	scoped, err := openControlStoreAtForCity(dir, cityPath, cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	if binding, federated := controlGraphExtraLeg(cityPath, dir); federated {
-		return []beads.Store{scoped, binding}, []beads.Store{scoped}, nil
-	}
-	return []beads.Store{scoped}, []beads.Store{scoped}, nil
-}
-
-// controlReadyCacheSourcesFn is the test seam for controlReadyCacheSources,
-// following the package's own var-seam idiom (cf. controlDispatcherServe,
-// dispatch_runtime.go). Production always uses controlReadyCacheSources.
-var controlReadyCacheSourcesFn = controlReadyCacheSources
-
-// cachedControlReadyUnion merges the cached ready sets, requiring EVERY leg to
-// answer from cache. A leg that is dirty or still priming sends the whole scan
-// to the fallback rather than to a short answer assembled from the legs that
-// happened to be warm.
-func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) {
-	if len(caches) == 0 {
-		return nil, false
-	}
-	if len(caches) == 1 {
-		return caches[0].CachedReady()
-	}
-	legs := make([][]beads.Bead, 0, len(caches))
-	for _, cache := range caches {
-		ready, ok := cache.CachedReady()
-		if !ok {
-			return nil, false
-		}
-		legs = append(legs, ready)
-	}
-	return mergeControlReadyLegs(legs...), true
-}
-
 // tryControlReadyFromCacheOrFallback answers a control-dispatcher readiness
 // scan in-process instead of running workflowServeControlReadyQueryForBeads's
 // shell script. handled reports whether workQuery was even recognized as a
@@ -585,25 +412,18 @@ func cachedControlReadyUnion(caches []*beads.CachingStore) ([]beads.Bead, bool) 
 // control-dispatcher readiness, not the decision logic (ga-ak6rt1): candidate
 // precedence, legacy/bare route aliasing, and the instantiating-metadata
 // dedup filter are reproduced exactly by evaluateControlReady.
+//
+// A sweep is one batched read (controlReadyFallbackReady) and loads no city
+// config. The name is kept from the cache it no longer has (ga-yhp) so the
+// change stays small to carry across branches.
 func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]string) (queue []hookBead, handled bool, err error) {
 	parsed, ok := parseControlReadyQuery(workQuery)
 	if !ok {
 		return nil, false, nil
 	}
 
-	cityPath := cityForStoreDir(dir)
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
-
-	if !parsed.includeEphemeral {
-		if caches := controlReadyCachesFor(dir, cityPath, cfg); len(caches) > 0 {
-			if ready, ok := cachedControlReadyUnion(caches); ok {
-				return beadsToHookBeads(evaluateControlReady(ready, parsed, envList)), true, nil
-			}
-		}
-	}
-
-	ready, err := controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
+	ready, err := controlReadyFallbackReady(dir, cityForStoreDir(dir), env, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err
 	}
