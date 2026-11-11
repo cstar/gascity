@@ -4,11 +4,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -63,35 +61,23 @@ func TestReadMemoProbeSeesAnotherProcessWriteOnRealProxy(t *testing.T) {
 		t.Fatalf("gc-beads-bd health: %v\n%s", err, out)
 	}
 
-	bdEnv := append(append([]string(nil), env...), "BEADS_DOLT_PROXIED_SERVER=1", "BEADS_BACKEND=dolt", "BD_NON_INTERACTIVE=1", "BEADS_ACTOR=gc-test")
-	// otherProcess runs bd as a process of its own, the way an agent writes.
+	bdEnv := map[string]string{}
+	for _, kv := range append(append([]string(nil), env...), "BEADS_DOLT_PROXIED_SERVER=1", "BEADS_BACKEND=dolt", "BD_NON_INTERACTIVE=1", "BEADS_ACTOR=gc-test") {
+		if key, value, ok := strings.Cut(kv, "="); ok {
+			bdEnv[key] = value
+		}
+	}
+	// The production runner, in exactly this environment; BD_BIN pins the
+	// test-built bd. Both the store under test and the "other process" writes
+	// go through it, each call its own bd process.
+	runner := beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
 	otherProcess := func(args ...string) []byte {
 		t.Helper()
-		cmd := exec.Command(bdPath, args...) //nolint:gosec // pinned test bd
-		cmd.Dir = dir
-		cmd.Env = bdEnv
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		out, err := runner(dir, "bd", args...)
 		if err != nil {
-			t.Fatalf("bd %v: %v\n%s%s", args, err, out, stderr.String())
+			t.Fatalf("bd %v: %v\n%s", args, err, out)
 		}
 		return out
-	}
-	runner := func(runDir, name string, args ...string) ([]byte, error) {
-		if name == "bd" {
-			name = bdPath
-		}
-		cmd := exec.Command(name, args...) //nolint:gosec // pinned test bd
-		cmd.Dir = runDir
-		cmd.Env = bdEnv
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-		}
-		return out, nil
 	}
 
 	target, reason, ok := bdReadMemoTargetFor(dir)

@@ -305,7 +305,7 @@ func (cs *controllerState) runBdReadMemoStatsLog(ctx context.Context) {
 		if city := cs.CityBeadStore(); city != nil {
 			stores = append(stores, city)
 		}
-		for _, store := range cs.BeadStores() {
+		for _, store := range cs.BeadStores() { // residency:allow — sums read-memo counters over every store the controller built; resolves no residency
 			stores = append(stores, store)
 		}
 		if stats, n := bdReadMemoStatsOf(stores); n > 0 {
