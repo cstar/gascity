@@ -58,6 +58,7 @@ func (s *BdStore) ApplyGraphPlanWithStorage(_ context.Context, plan *GraphApplyP
 		args = append(args, "--no-history")
 	}
 	out, err := s.runner(s.dir, "bd", args...)
+	s.noteBDWrite()
 	if err != nil {
 		return nil, fmt.Errorf("bd create --graph: %w", err)
 	}

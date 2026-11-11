@@ -491,6 +491,12 @@ type BdStore struct {
 	inlineDeps inlineDependencyProjection
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+
+	// readMemo keeps pure bd read answers while the scope's database is
+	// unchanged; nil (the default) reads bd every time. See
+	// bdstore_read_memo.go.
+	readMemoMu sync.RWMutex
+	readMemo   *bdReadMemo
 }
 
 const (
@@ -617,6 +623,7 @@ func (s *BdStore) Init(prefix, host, port string) error {
 		args = append(args, "--server-port", port)
 	}
 	_, err := s.runner(s.dir, "bd", args...)
+	s.noteBDWrite()
 	if err != nil {
 		return fmt.Errorf("bd init: %w", err)
 	}
@@ -626,6 +633,7 @@ func (s *BdStore) Init(prefix, host, port string) error {
 // ConfigSet sets a bd config key/value pair via bd config set.
 func (s *BdStore) ConfigSet(key, value string) error {
 	_, err := s.runner(s.dir, "bd", "config", "set", key, value)
+	s.noteBDWrite()
 	if err != nil {
 		return fmt.Errorf("bd config set: %w", err)
 	}
@@ -657,6 +665,9 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 		out, err = s.purgeRunner(dir, env, args...)
 	} else {
 		out, err = execPurge(dir, env, args)
+	}
+	if !dryRun {
+		s.noteBDWrite()
 	}
 	if err != nil {
 		return PurgeResult{}, fmt.Errorf("bd purge: %w", err)
@@ -1418,7 +1429,15 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// single recover-and-retry per call; the wrapper's outer attempts give the
 	// rebind enough total time to complete under CI load, matching every other
 	// BdStore read/write path (ga-gellq1).
-	out, err := s.runBDTransientRead("show", "--json", id)
+	//
+	// An id under this store's own prefix is a row of this scope's database and
+	// may be answered by the read memo; any other prefix can route through bd's
+	// routes into a database the memo's probe does not watch, so it stays live.
+	read := s.runBDTransientRead
+	if s.idPrefix != "" && beadIDPrefix(id) == s.idPrefix {
+		read = s.runBDPureRead
+	}
+	out, err := read("show", "--json", id)
 	if err != nil {
 		// Only a bead-level miss may become ErrNotFound. Callers treat
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
@@ -1658,6 +1677,7 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
 		"; SELECT ROW_COUNT() AS rows_affected"
+	defer s.noteBDWrite()
 	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
 	if err != nil {
 		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
@@ -2439,6 +2459,7 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 	var err error
 	var out []byte
 	args = s.bdTransientWriteArgs(args)
+	defer s.noteBDWrite()
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
@@ -2876,7 +2897,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
@@ -2998,7 +3019,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// transient-read path (as listViaBDList already does) so BOTH subprocesses
 	// inside listWispsTier are bounded — a bare s.runner call here would be the
 	// one unretried read on the hot tier-merge path.
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3047,7 +3068,7 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3461,7 +3482,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -3503,7 +3524,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil
