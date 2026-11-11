@@ -491,6 +491,12 @@ type BdStore struct {
 	inlineDeps inlineDependencyProjection
 
 	localStrings *localSidecar // clone-local data; see Store.SetLocalString
+
+	// readMemo keeps pure bd read answers while the scope's database is
+	// unchanged; nil (the default) reads bd every time. See
+	// bdstore_read_memo.go.
+	readMemoMu sync.RWMutex
+	readMemo   *bdReadMemo
 }
 
 const (
@@ -617,6 +623,7 @@ func (s *BdStore) Init(prefix, host, port string) error {
 		args = append(args, "--server-port", port)
 	}
 	_, err := s.runner(s.dir, "bd", args...)
+	s.noteBDWrite()
 	if err != nil {
 		return fmt.Errorf("bd init: %w", err)
 	}
@@ -626,6 +633,7 @@ func (s *BdStore) Init(prefix, host, port string) error {
 // ConfigSet sets a bd config key/value pair via bd config set.
 func (s *BdStore) ConfigSet(key, value string) error {
 	_, err := s.runner(s.dir, "bd", "config", "set", key, value)
+	s.noteBDWrite()
 	if err != nil {
 		return fmt.Errorf("bd config set: %w", err)
 	}
@@ -657,6 +665,9 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 		out, err = s.purgeRunner(dir, env, args...)
 	} else {
 		out, err = execPurge(dir, env, args)
+	}
+	if !dryRun {
+		s.noteBDWrite()
 	}
 	if err != nil {
 		return PurgeResult{}, fmt.Errorf("bd purge: %w", err)
@@ -1418,7 +1429,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// single recover-and-retry per call; the wrapper's outer attempts give the
 	// rebind enough total time to complete under CI load, matching every other
 	// BdStore read/write path (ga-gellq1).
-	out, err := s.runBDTransientRead("show", "--json", id)
+	out, err := s.runBDReadAboutIDs([]string{id}, "show", "--json", id)
 	if err != nil {
 		// Only a bead-level miss may become ErrNotFound. Callers treat
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
@@ -1658,6 +1669,7 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 		" AND status = 'in_progress'" +
 		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
 		"; SELECT ROW_COUNT() AS rows_affected"
+	defer s.noteBDWrite()
 	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
 	if err != nil {
 		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
@@ -2439,6 +2451,7 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 	var err error
 	var out []byte
 	args = s.bdTransientWriteArgs(args)
+	defer s.noteBDWrite()
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
@@ -2829,13 +2842,17 @@ func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 	return s.listViaBDList(query)
 }
 
-func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+// listViaBDList runs one bd list for query. extraArgs go right after
+// "list --json"; they may only narrow what bd returns (applyListQuery still
+// filters the rows Go-side).
+func (s *BdStore) listViaBDList(query ListQuery, extraArgs ...string) ([]Bead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
 		limit = 0
 	}
 	args := []string{"list", "--json"}
+	args = append(args, extraArgs...)
 	if serverQuery.Label != "" {
 		args = append(args, "--label="+serverQuery.Label)
 	}
@@ -2876,7 +2893,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
@@ -2927,9 +2944,10 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs is a Go-side residual filter (see ListQuery.Matches): this builder
+	// does not translate it into bd's --id (only listClosedBlockersByID passes
+	// --id itself), so a bd-side limit could truncate before the matching IDs
+	// are even fetched.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
@@ -2998,7 +3016,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	// transient-read path (as listViaBDList already does) so BOTH subprocesses
 	// inside listWispsTier are bounded — a bare s.runner call here would be the
 	// one unretried read on the hot tier-merge path.
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3047,7 +3065,7 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDPureRead(args...)
 	if err != nil {
 		if isBdQueryUnsupported(err) {
 			return nil, nil
@@ -3346,12 +3364,7 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	for id := range blockerIDSet {
 		blockerIDs = append(blockerIDs, id)
 	}
-	// Status "closed" is what makes this lookup closed-inclusive: it adds
-	// --all server-side and keeps closed rows through ListQuery.Matches. A
-	// default query drops every closed row on both sides, and a closed
-	// blocker is the ONLY kind this veto can ever fire on, so without it the
-	// statusByID lookup below is empty and the whole check is dead code.
-	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"})
+	blockers, err := s.listClosedBlockersByID(blockerIDs)
 	if err != nil {
 		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
 	}
@@ -3378,6 +3391,46 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 		}
 	}
 	return result, nil
+}
+
+// readyBlockerLookupChunk bounds how many ids one blocker lookup names, so a
+// candidate set with many blockers never builds an unbounded argv.
+const readyBlockerLookupChunk = 200
+
+// listClosedBlockersByID reads the closed rows among ids from both storage
+// planes with bd list's exact-id filter, in sorted slices of at most
+// readyBlockerLookupChunk ids. Going through List instead would fetch each
+// entire closed tier (issues, then wisps) before filtering by id in Go.
+//
+// Status "closed" is what makes the lookup closed-inclusive: it adds --all
+// server-side and keeps closed rows through ListQuery.Matches. A closed
+// blocker is the ONLY kind the work-outcome veto can fire on, so a lookup
+// without it would leave the veto dead code.
+//
+// bd list --include-ephemeral returns wisp-plane rows by id alongside issues,
+// so one call per slice covers both planes. An empty --id= is never sent: bd
+// treats it as no filter at all and returns the whole closed history.
+func (s *BdStore) listClosedBlockersByID(ids []string) ([]Bead, error) {
+	sorted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			sorted = append(sorted, id)
+		}
+	}
+	sort.Strings(sorted)
+	var blockers []Bead
+	for start := 0; start < len(sorted); start += readyBlockerLookupChunk {
+		slice := sorted[start:min(start+readyBlockerLookupChunk, len(sorted))]
+		rows, err := s.listViaBDList(
+			ListQuery{IDs: slice, TierMode: TierBoth, Status: "closed"},
+			"--id="+strings.Join(slice, ","), "--include-ephemeral",
+		)
+		if err != nil {
+			return nil, err
+		}
+		blockers = append(blockers, rows...)
+	}
+	return blockers, nil
 }
 
 func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
@@ -3461,7 +3514,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDReadAboutIDs([]string{id}, args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -3503,7 +3556,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDReadAboutIDs(ids, args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil

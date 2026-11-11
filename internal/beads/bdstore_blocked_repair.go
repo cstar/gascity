@@ -47,6 +47,7 @@ func (s *BdStore) ConfigGet(key string) (string, error) {
 // On a consistent store it changes nothing and reports 0.
 func (s *BdStore) RecomputeBlocked() (int, error) {
 	out, err := s.runner(s.dir, "bd", "recompute-blocked", "--json")
+	s.noteBDWrite()
 	if err != nil {
 		return 0, fmt.Errorf("bd recompute-blocked: %w", err)
 	}

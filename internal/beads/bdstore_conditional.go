@@ -453,6 +453,7 @@ func (s *BdStore) runConditionalWrite(id string, expectedRevision int64, args ..
 		verb = args[0]
 	}
 	prefixed := s.bdTransientWriteArgs(args)
+	defer s.noteBDWrite()
 	var (
 		lastOut []byte
 		lastErr error

@@ -266,6 +266,9 @@ func newControllerStateWithRoutes(
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
+		// Before the cache wraps it, so the cache's prime and reconcile reads
+		// go through the memo too (bd_read_memo_probe.go).
+		enableBdReadMemo(store, cityPath, "city")
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
@@ -273,6 +276,9 @@ func newControllerStateWithRoutes(
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
+	if ctx.Done() != nil {
+		go cs.runBdReadMemoStatsLog(ctx)
+	}
 	return cs
 }
 
@@ -396,6 +402,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
+		enableBdReadMemo(store, scopeRoot, "rig/"+rig.Name)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
 	}
 	return stores
@@ -958,6 +965,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
+		enableBdReadMemo(cityStore, cs.cityPath, "city")
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
 		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)

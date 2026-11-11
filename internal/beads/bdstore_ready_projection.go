@@ -441,7 +441,13 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 	// this fetch drops out of the projection; the reconciler preserves its last
 	// cached is_blocked (preserveCachedReadyProjectionLocked) so the absence
 	// does not flap a spurious bead.updated.
-	out, err := s.runner(s.dir, "bd", "sql", readyProjectionSQL(), "--json")
+	//
+	// The read memo may answer it (is_blocked is a column of the database, not
+	// a function of the clock); a miss runs bd directly, without the transient
+	// retry wrapper, as this read always has.
+	out, err := s.runBDPureReadWith(func(args ...string) ([]byte, error) {
+		return s.runner(s.dir, "bd", args...)
+	}, "sql", readyProjectionSQL(), "--json")
 	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
 			// Belt-and-braces to the backend gate: a scope whose metadata does
