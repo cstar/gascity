@@ -132,18 +132,8 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 		return nil, fmt.Errorf("listing legacy convoy children of %s: %w", convoyID, err)
 	}
 
-	seen := make(map[string]bool, len(legacyChildren))
-	members := make([]beads.Bead, 0, len(legacyChildren))
-	add := func(b beads.Bead) {
-		if seen[b.ID] {
-			return
-		}
-		if !includeClosed && IsTerminalStatus(b.Status) {
-			return
-		}
-		seen[b.ID] = true
-		members = append(members, b)
-	}
+	members := newMemberSet(includeClosed, len(legacyChildren))
+	add := members.add
 	for _, child := range legacyChildren {
 		add(child)
 	}
@@ -169,8 +159,41 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 		add(item)
 	}
 
-	sortMembers(members)
-	return members, nil
+	return members.sorted(), nil
+}
+
+// memberSet accumulates one convoy's members the way MembersIn always has:
+// the first sighting of an id wins, terminal members are dropped unless the
+// caller asked for them, and the result comes back in sortMembers order. It is
+// shared by MembersIn and MembersBatch so the two cannot drift apart.
+type memberSet struct {
+	includeClosed bool
+	seen          map[string]bool
+	members       []beads.Bead
+}
+
+func newMemberSet(includeClosed bool, sizeHint int) *memberSet {
+	return &memberSet{
+		includeClosed: includeClosed,
+		seen:          make(map[string]bool, sizeHint),
+		members:       make([]beads.Bead, 0, sizeHint),
+	}
+}
+
+func (m *memberSet) add(b beads.Bead) {
+	if m.seen[b.ID] {
+		return
+	}
+	if !m.includeClosed && IsTerminalStatus(b.Status) {
+		return
+	}
+	m.seen[b.ID] = true
+	m.members = append(m.members, b)
+}
+
+func (m *memberSet) sorted() []beads.Bead {
+	sortMembers(m.members)
+	return m.members
 }
 
 func unresolvedTrackedItem(id string) beads.Bead {
