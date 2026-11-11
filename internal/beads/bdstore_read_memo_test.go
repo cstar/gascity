@@ -592,3 +592,23 @@ func TestReadMemoReadyBlockerLookupIsMemoized(t *testing.T) {
 		t.Fatalf("bd list blocker lookups = %d, want 1 (the second is a memo hit)", got)
 	}
 }
+
+// bd dep list resolves its ids like bd show does, so the same own-prefix rule
+// applies: a batch with any foreign id stays live.
+func TestReadMemoDepListForeignPrefixIsNeverMemoized(t *testing.T) {
+	store, runner, _ := newMemoTestStore(t, memoTestListResponder)
+	for i := 0; i < 2; i++ {
+		if _, err := store.DepList("ga-1", "down"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DepListBatch([]string{"ga-1", "ga-2"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DepListBatch([]string{"ga-1", "hq-2"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := runner.count("dep"); got != 4 {
+		t.Fatalf("bd dep list calls = %d, want 4 (2 own-prefix memoized once each, the mixed batch live twice)", got)
+	}
+}

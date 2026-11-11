@@ -1429,15 +1429,7 @@ func (s *BdStore) Get(id string) (Bead, error) {
 	// single recover-and-retry per call; the wrapper's outer attempts give the
 	// rebind enough total time to complete under CI load, matching every other
 	// BdStore read/write path (ga-gellq1).
-	//
-	// An id under this store's own prefix is a row of this scope's database and
-	// may be answered by the read memo; any other prefix can route through bd's
-	// routes into a database the memo's probe does not watch, so it stays live.
-	read := s.runBDTransientRead
-	if s.idPrefix != "" && beadIDPrefix(id) == s.idPrefix {
-		read = s.runBDPureRead
-	}
-	out, err := read("show", "--json", id)
+	out, err := s.runBDReadAboutIDs([]string{id}, "show", "--json", id)
 	if err != nil {
 		// Only a bead-level miss may become ErrNotFound. Callers treat
 		// ErrNotFound as "confirmed absent" (the process-table orphan sweep
@@ -3522,7 +3514,7 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		args = append(args, "--direction=up")
 	}
-	out, err := s.runBDPureRead(args...)
+	out, err := s.runBDReadAboutIDs([]string{id}, args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -3564,7 +3556,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
-	out, err := s.runBDPureRead(args...)
+	out, err := s.runBDReadAboutIDs(ids, args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil

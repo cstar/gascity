@@ -156,6 +156,30 @@ func (s *BdStore) runBDPureRead(args ...string) ([]byte, error) {
 	return s.runBDPureReadWith(s.runBDTransientRead, args...)
 }
 
+// runBDReadAboutIDs runs a read addressed to specific bead ids (bd show, bd dep
+// list). Ids under this store's own prefix are rows of this scope's database,
+// so the read may go through the memo; any other prefix can route through bd's
+// routes into a database the memo's probe does not watch, so such a read, and a
+// store with no prefix, stays live.
+func (s *BdStore) runBDReadAboutIDs(ids []string, args ...string) ([]byte, error) {
+	if s.ownsAllIDs(ids) {
+		return s.runBDPureRead(args...)
+	}
+	return s.runBDTransientRead(args...)
+}
+
+func (s *BdStore) ownsAllIDs(ids []string) bool {
+	if s == nil || s.idPrefix == "" || len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if beadIDPrefix(id) != s.idPrefix {
+			return false
+		}
+	}
+	return true
+}
+
 // runBDPureReadWith is runBDPureRead over a caller-chosen live read, for the one
 // pure read (the is_blocked projection) that runs bd without the transient
 // retry wrapper and must keep doing so.
