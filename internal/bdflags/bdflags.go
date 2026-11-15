@@ -79,6 +79,12 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
 	},
+	// PortHarbour 2026-11-15: without this entry --if-assignee was an unknown flag, so its value
+	// (a gcg-session-… id, a bead of the infra class) was judged as an addressed id and the
+	// compare-and-swap unclaim was refused as "owned by the infra class binding".
+	"unclaim": {
+		"--if-assignee": true, "-r": true, "--reason": true,
+	},
 	"reopen": {
 		"-r": true, "--reason": true,
 	},
@@ -155,6 +161,9 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
 		"--force": true, "--history": true, "--no-history": true,
 		"--persistent": true, "--stdin": true,
+	},
+	"unclaim": {
+		"--force": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
